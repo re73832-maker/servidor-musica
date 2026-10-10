@@ -15,7 +15,6 @@ app.get('/', (req, res) => {
 
 // NUEVA RUTA: El motor que descarga la música
 app.get('/descargar', (req, res) => {
-  // Capturamos lo que tu papá escriba en el buscador (ej. ?q=vicente fernandez)
   const busqueda = req.query.q;
 
   if (!busqueda) {
@@ -24,18 +23,17 @@ app.get('/descargar', (req, res) => {
 
   console.log(`Buscando y preparando audio de: ${busqueda}...`);
 
-  // Le decimos al navegador que lo que va a recibir es un archivo de audio MP3
-  res.header('Content-Type', 'audio/mpeg');
-  res.header('Content-Disposition', `attachment; filename="cancion.mp3"`);
+  // Le decimos al celular que recibirá un archivo de audio nativo (m4a)
+  res.header('Content-Type', 'audio/mp4');
+  res.header('Content-Disposition', `attachment; filename="cancion.m4a"`);
 
-  // Ejecutamos yt-dlp: 'ytsearch1:' busca el primer video que coincida con el texto
+  // Ejecutamos yt-dlp pidiendo el mejor audio original directamente en m4a (sin convertir)
   const proceso = ytDlp.exec(`ytsearch1:${busqueda}`, {
-    extractAudio: true,
-    audioFormat: 'mp3',
-    output: '-', // El guion indica que el archivo se transmite en vivo, no se guarda en carpeta
+    format: 'bestaudio[ext=m4a]', 
+    output: '-' 
   }, { stdio: ['ignore', 'pipe', 'ignore'] });
 
-  // Conectamos el audio que se va descargando directo a la respuesta de tu servidor
+  // Conectamos el audio directo a la respuesta de tu servidor
   proceso.stdout.pipe(res);
 });
 
