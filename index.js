@@ -8,12 +8,10 @@ const PUERTO = 4000;
 app.use(cors());
 app.use(express.json());
 
-// Ruta de prueba
 app.get('/', (req, res) => {
   res.send('¡El motor de descargas de música está funcionando!');
 });
 
-// NUEVA RUTA: El motor que descarga la música
 app.get('/descargar', (req, res) => {
   const busqueda = req.query.q;
 
@@ -26,17 +24,15 @@ app.get('/descargar', (req, res) => {
   res.header('Content-Type', 'audio/mp4');
   res.header('Content-Disposition', `attachment; filename="cancion.mp4"`);
 
-  // Quitamos el jsEngine que causó el error y dejamos solo el disfraz de Android
-  const proceso = ytDlp.exec(`ytsearch1:${busqueda}`, {
+  // SOLUCIÓN DEFINITIVA: Buscar en SoundCloud (scsearch1:) para saltar el bloqueo de IP de YouTube
+  const proceso = ytDlp.exec(`scsearch1:${busqueda}`, {
     format: 'bestaudio', 
-    extractorArgs: 'youtube:player_client=android', 
     output: '-' 
   }, { stdio: ['ignore', 'pipe', 'inherit'] });
 
   proceso.stdout.pipe(res);
 });
 
-// Iniciar el servidor
 app.listen(PUERTO, () => {
   console.log(`Servidor activo y escuchando en http://localhost:${PUERTO}`);
 });
