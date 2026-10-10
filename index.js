@@ -8,16 +8,11 @@ const app = express();
 const PUERTO = process.env.PORT || 4000;
 const RUTA_DIST = path.join(__dirname, 'dist');
 
-// Middleware básico y CORS
+// Middleware básico y CORS limpio para cualquier cliente web
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'ngrok-skip-browser-warning',
-    'Bypass-Tunnel-Reminder'
-  ],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Range', 'Accept'],
   exposedHeaders: ['Content-Disposition', 'Content-Length', 'Accept-Ranges']
 }));
 
@@ -28,8 +23,8 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', server: 'servidor-musica', port: PUERTO });
 });
 
-// 2. Endpoint principal de descarga y streaming de audio robusto
-app.get('/descargar', (req, res) => {
+// Función compartida para búsqueda, stream y descarga de audio
+function manejarDescargaAudio(req, res) {
   const busqueda = req.query.q;
   if (!busqueda) {
     return res.status(400).json({ error: 'Debes enviar el nombre de una canción en el parámetro ?q=' });
@@ -102,12 +97,17 @@ app.get('/descargar', (req, res) => {
     });
 
   } catch (error) {
-    console.error('Excepción en /descargar:', error);
+    console.error('Excepción al procesar audio:', error);
     if (!res.headersSent && !headersSent) {
       return res.status(500).json({ error: 'Error interno del servidor al procesar la canción.' });
     }
   }
-});
+}
+
+// 2. Rutas coincidentes del backend para streaming y descarga
+app.get('/descargar', manejarDescargaAudio);
+app.get('/buscar', manejarDescargaAudio);
+app.get('/stream', manejarDescargaAudio);
 
 // 3. Servir archivos estáticos del frontend compilado desde ./dist local
 app.use(express.static(RUTA_DIST));
