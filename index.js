@@ -23,15 +23,15 @@ app.get('/descargar', (req, res) => {
 
   console.log(`Buscando y preparando audio de: ${busqueda}...`);
 
-  // Le decimos al celular que recibirá un archivo de audio nativo (m4a)
+  // Le decimos al navegador que recibirá un archivo de audio genérico
   res.header('Content-Type', 'audio/mp4');
-  res.header('Content-Disposition', `attachment; filename="cancion.m4a"`);
+  res.header('Content-Disposition', `attachment; filename="cancion.mp4"`);
 
-  // Ejecutamos yt-dlp pidiendo el mejor audio original directamente en m4a (sin convertir)
+  // Pedimos el mejor audio disponible y encendemos los mensajes de error ('inherit')
   const proceso = ytDlp.exec(`ytsearch1:${busqueda}`, {
-    format: 'bestaudio[ext=m4a]', 
+    format: 'bestaudio', 
     output: '-' 
-  }, { stdio: ['ignore', 'pipe', 'ignore'] });
+  }, { stdio: ['ignore', 'pipe', 'inherit'] });
 
   // Conectamos el audio directo a la respuesta de tu servidor
   proceso.stdout.pipe(res);
@@ -41,5 +41,3 @@ app.get('/descargar', (req, res) => {
 app.listen(PUERTO, () => {
   console.log(`Servidor activo y escuchando en http://localhost:${PUERTO}`);
 });
-
-// Forzar actualizacion a la nube
