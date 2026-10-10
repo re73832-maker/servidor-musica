@@ -23,19 +23,16 @@ app.get('/descargar', (req, res) => {
 
   console.log(`Buscando y preparando audio de: ${busqueda}...`);
 
-  // Le decimos al navegador que recibirá un archivo de audio
   res.header('Content-Type', 'audio/mp4');
   res.header('Content-Disposition', `attachment; filename="cancion.mp4"`);
 
-  // TRUCO ANTI-BLOQUEO: Usar YouTube Music (ytmsearch1) y fingir ser un celular Android
-  const proceso = ytDlp.exec(`ytmsearch1:${busqueda}`, {
+  // Quitamos el jsEngine que causó el error y dejamos solo el disfraz de Android
+  const proceso = ytDlp.exec(`ytsearch1:${busqueda}`, {
     format: 'bestaudio', 
-    extractorArgs: 'youtube:player_client=android', // Disfraz de Android
-    jsEngine: 'node', // Activamos el motor de JavaScript para resolver el acertijo
+    extractorArgs: 'youtube:player_client=android', 
     output: '-' 
   }, { stdio: ['ignore', 'pipe', 'inherit'] });
 
-  // Conectamos el audio directo a la respuesta de tu servidor
   proceso.stdout.pipe(res);
 });
 
