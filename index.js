@@ -18,7 +18,7 @@ app.use(cors({
     'ngrok-skip-browser-warning',
     'Bypass-Tunnel-Reminder'
   ],
-  exposedHeaders: ['Content-Disposition', 'Content-Length']
+  exposedHeaders: ['Content-Disposition', 'Content-Length', 'Accept-Ranges']
 }));
 
 app.use(express.json());
@@ -28,58 +28,83 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', server: 'servidor-musica', port: PUERTO });
 });
 
-// 2. Endpoint principal de descarga y streaming de audio
+// 2. Endpoint principal de descarga y streaming de audio robusto
 app.get('/descargar', (req, res) => {
   const busqueda = req.query.q;
   if (!busqueda) {
-    return res.status(400).send('Debes enviar el nombre de una canción en el parámetro ?q=');
+    return res.status(400).json({ error: 'Debes enviar el nombre de una canción en el parámetro ?q=' });
   }
 
   console.log(`[${new Date().toLocaleTimeString()}] Buscando y transmitiendo: "${busqueda}"...`);
 
-  // Cabeceras de streaming
-  res.header('Content-Type', 'audio/mp4');
-  res.header('Content-Disposition', `attachment; filename="${encodeURIComponent(busqueda)}.m4a"`);
-  res.header('Cache-Control', 'no-cache');
+  let headersSent = false;
+  let proceso;
 
   try {
-    const proceso = ytdlp.exec(`ytsearch1:${busqueda}`, {
+    proceso = ytdlp.exec(`ytsearch1:${busqueda}`, {
       format: '140/bestaudio[ext=m4a]/bestaudio',
       output: '-'
     }, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    if (proceso.stdout) {
-      proceso.stdout.pipe(res);
-    }
+    // Si el cliente cancela la petición prematuramente
+    req.on('close', () => {
+      if (proceso && proceso.kill) {
+        try { proceso.kill(); } catch (_) {}
+      }
+    });
+
+    proceso.on('error', (err) => {
+      console.error('Error al iniciar proceso yt-dlp:', err);
+      if (!res.headersSent && !headersSent) {
+        headersSent = true;
+        return res.status(500).json({ error: 'Error al iniciar el proceso de descarga de audio.' });
+      }
+    });
+
+    let primerChunk = true;
+
+    proceso.stdout.on('data', (chunk) => {
+      if (primerChunk) {
+        primerChunk = false;
+        headersSent = true;
+        res.writeHead(200, {
+          'Content-Type': 'audio/mpeg',
+          'Accept-Ranges': 'bytes',
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(busqueda)}.mp3"`,
+          'Cache-Control': 'no-cache'
+        });
+      }
+      res.write(chunk);
+    });
+
+    proceso.stdout.on('end', () => {
+      if (!headersSent) {
+        headersSent = true;
+        return res.status(500).json({ error: 'No se recibieron datos de audio del proveedor de contenido.' });
+      }
+      res.end();
+    });
 
     if (proceso.stderr) {
       proceso.stderr.on('data', (data) => {
         const mensaje = data.toString();
         if (mensaje.toLowerCase().includes('error')) {
-          console.error(`[yt-dlp error]: ${mensaje}`);
+          console.error(`[yt-dlp error]: ${mensaje.trim()}`);
         }
       });
     }
 
-    // Manejar aborto de la conexión por parte del cliente
-    req.on('close', () => {
-      if (proceso && proceso.kill) {
-        try {
-          proceso.kill();
-        } catch (_) {}
+    proceso.on('close', (code) => {
+      if (code !== 0 && !headersSent) {
+        headersSent = true;
+        return res.status(500).json({ error: `El extractor de audio finalizó con código de error ${code}.` });
       }
     });
 
-    proceso.on('error', (err) => {
-      console.error('Error al ejecutar yt-dlp:', err);
-      if (!res.headersSent) {
-        res.status(500).send('Error al procesar la descarga de audio.');
-      }
-    });
   } catch (error) {
     console.error('Excepción en /descargar:', error);
-    if (!res.headersSent) {
-      res.status(500).send('Error interno del servidor.');
+    if (!res.headersSent && !headersSent) {
+      return res.status(500).json({ error: 'Error interno del servidor al procesar la canción.' });
     }
   }
 });
