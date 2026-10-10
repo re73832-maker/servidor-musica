@@ -1,14 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const ytdlp = require('yt-dlp-exec');
+const ffmpegPath = require('ffmpeg-static');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const app = express();
 const PUERTO = process.env.PORT || 4000;
 const RUTA_DIST = path.join(__dirname, 'dist');
 
-// Middleware básico y CORS limpio para cualquier cliente web
+// Middleware y CORS limpio
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -24,95 +26,8 @@ app.get('/health', (req, res) => {
 });
 
 /**
- * Intenta ejecutar yt-dlp con una consulta y opciones específicas.
- * Retorna true si logró transmitir audio al cliente, o false si la fuente falló.
- */
-function intentarStreamYtDlp(query, opciones, req, res) {
-  return new Promise((resolve) => {
-    let proceso;
-    let recibioDatos = false;
-    let timerTimeout;
-
-    try {
-      console.log(`[Motor Audio]: Lanzando extractor para "${query}"...`);
-      proceso = ytdlp.exec(query, opciones, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-      const limpiar = () => {
-        if (timerTimeout) clearTimeout(timerTimeout);
-        if (proceso && proceso.kill) {
-          try { proceso.kill(); } catch (_) {}
-        }
-      };
-
-      req.on('close', limpiar);
-
-      // Si en 14 segundos no hay datos de esta fuente, liberar e intentar siguiente
-      timerTimeout = setTimeout(() => {
-        if (!recibioDatos) {
-          console.warn(`[Timeout]: No hubo chunks de audio en 14s para "${query}".`);
-          limpiar();
-          resolve(false);
-        }
-      }, 14000);
-
-      proceso.stdout.on('data', (chunk) => {
-        if (!recibioDatos) {
-          recibioDatos = true;
-          if (timerTimeout) clearTimeout(timerTimeout);
-          console.log(`[Streaming OK]: ¡Transmitiendo audio exitosamente desde "${query}"!`);
-
-          res.writeHead(200, {
-            'Content-Type': 'audio/mpeg',
-            'Accept-Ranges': 'bytes',
-            'Content-Disposition': `attachment; filename="${encodeURIComponent(query)}.mp3"`,
-            'Cache-Control': 'no-cache'
-          });
-        }
-        res.write(chunk);
-      });
-
-      proceso.stdout.on('end', () => {
-        if (timerTimeout) clearTimeout(timerTimeout);
-        if (recibioDatos) {
-          res.end();
-          resolve(true);
-        } else {
-          resolve(false);
-        }
-      });
-
-      if (proceso.stderr) {
-        proceso.stderr.on('data', (data) => {
-          const mensaje = data.toString().trim();
-          if (mensaje) {
-            console.error(`[yt-dlp stderr (${query})]: ${mensaje}`);
-          }
-        });
-      }
-
-      proceso.on('error', (err) => {
-        console.error(`[Error de proceso (${query})]:`, err);
-        limpiar();
-        if (!recibioDatos) resolve(false);
-      });
-
-      proceso.on('close', (code) => {
-        if (timerTimeout) clearTimeout(timerTimeout);
-        if (!recibioDatos) {
-          console.warn(`[Cierre (${query})]: Salió con código ${code} sin datos de audio.`);
-          resolve(false);
-        }
-      });
-
-    } catch (err) {
-      console.error(`[Excepción al iniciar extractor (${query})]:`, err);
-      resolve(false);
-    }
-  });
-}
-
-/**
- * Manejador unificado con sistema multifuente antibloqueo para IPs de Render
+ * Descarga y extrae audio completo en disco temporal en formato MP3 (320kbps/alta fidelidad)
+ * eliminando problemas de cortes a los 9 segundos y fallos de streaming.
  */
 async function manejarDescargaAudio(req, res) {
   const busqueda = req.query.q;
@@ -120,84 +35,121 @@ async function manejarDescargaAudio(req, res) {
     return res.status(400).json({ error: 'Debes enviar el nombre de una canción en el parámetro ?q=' });
   }
 
+  const idTemp = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  const archivoTemp = path.join(os.tmpdir(), `${idTemp}.mp3`);
+
   console.log(`\n======================================================================`);
-  console.log(`[${new Date().toLocaleTimeString()}] Nueva petición de descarga: "${busqueda}"`);
+  console.log(`[${new Date().toLocaleTimeString()}] Nueva descarga completa: "${busqueda}"`);
+  console.log(`[Archivo Temporal]: ${archivoTemp}`);
 
-  // FUENTE 1: YouTube con flags estándar antibloqueo
-  console.log(`[Paso 1/3]: Intentando YouTube estándar...`);
-  const ytExito = await intentarStreamYtDlp(
-    `ytsearch1:${busqueda}`,
-    {
-      format: '140/bestaudio[ext=m4a]/bestaudio',
-      output: '-',
+  const limpiarArchivo = () => {
+    try {
+      if (fs.existsSync(archivoTemp)) {
+        fs.unlinkSync(archivoTemp);
+        console.log(`[Limpieza]: Archivo temporal ${archivoTemp} eliminado.`);
+      }
+    } catch (_) {}
+  };
+
+  res.on('finish', limpiarArchivo);
+  res.on('close', limpiarArchivo);
+
+  let exito = false;
+
+  // 1. Intento principal: YouTube con extracción nativa a MP3 alta fidelidad
+  try {
+    console.log(`[Paso 1/2]: Descargando pista completa desde YouTube...`);
+    await ytdlp(`ytsearch1:${busqueda}`, {
+      extractAudio: true,
+      audioFormat: 'mp3',
+      audioQuality: 0,
+      ffmpegLocation: ffmpegPath,
+      output: archivoTemp,
+      noPlaylist: true,
+      matchFilter: 'duration > 60',
       noCheckCertificates: true,
       preferFreeFormats: true,
       noWarnings: true
-    },
-    req,
-    res
-  );
+    });
 
-  if (ytExito) {
-    console.log(`[Resultado]: Descarga completada vía YouTube.`);
-    return;
+    if (fs.existsSync(archivoTemp)) {
+      const stats = fs.statSync(archivoTemp);
+      if (stats.size >= 1024 * 1024) { // Más de 1 MB
+        console.log(`[Éxito YouTube]: Descargado ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+        exito = true;
+      } else {
+        console.warn(`[Aviso YouTube]: El archivo descargado es menor a 1 MB (${stats.size} bytes). Probando fallback.`);
+        limpiarArchivo();
+      }
+    }
+  } catch (errYt) {
+    console.warn(`[YouTube Falló]: ${errYt.message || errYt}. Pasando a fallback...`);
+    limpiarArchivo();
   }
 
-  if (res.writableEnded || res.headersSent) return;
+  // 2. Fallback automático: SoundCloud con extracción completa a MP3
+  if (!exito) {
+    try {
+      console.log(`[Paso 2/2 - Fallback]: Descargando pista completa desde SoundCloud (scsearch1)...`);
+      await ytdlp(`scsearch1:${busqueda}`, {
+        extractAudio: true,
+        audioFormat: 'mp3',
+        audioQuality: 0,
+        ffmpegLocation: ffmpegPath,
+        output: archivoTemp,
+        noPlaylist: true,
+        matchFilter: 'duration > 60',
+        noCheckCertificates: true,
+        preferFreeFormats: true,
+        noWarnings: true
+      });
 
-  // FUENTE 2: Fallback automático a SoundCloud (Sin bloqueos de Datacenter en Render)
-  console.log(`[Paso 2/3 - Fallback]: YouTube no entregó stream. Intentando SoundCloud (scsearch1)...`);
-  const scExito = await intentarStreamYtDlp(
-    `scsearch1:${busqueda}`,
-    {
-      format: 'bestaudio',
-      output: '-',
-      noCheckCertificates: true,
-      preferFreeFormats: true,
-      noWarnings: true
-    },
-    req,
-    res
-  );
-
-  if (scExito) {
-    console.log(`[Resultado]: Descarga completada vía SoundCloud.`);
-    return;
+      if (fs.existsSync(archivoTemp)) {
+        const stats = fs.statSync(archivoTemp);
+        if (stats.size >= 1024 * 1024) {
+          console.log(`[Éxito SoundCloud]: Descargado ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+          exito = true;
+        } else {
+          console.warn(`[Aviso SoundCloud]: El archivo descargado es menor a 1 MB (${stats.size} bytes).`);
+          limpiarArchivo();
+        }
+      }
+    } catch (errSc) {
+      console.error(`[SoundCloud Falló]: ${errSc.message || errSc}`);
+      limpiarArchivo();
+    }
   }
 
-  if (res.writableEnded || res.headersSent) return;
+  // Si se obtuvo el archivo MP3 completo (> 1 MB)
+  if (exito && fs.existsSync(archivoTemp)) {
+    const stats = fs.statSync(archivoTemp);
+    console.log(`[Enviando MP3]: Transmitiendo archivo completo al cliente (${stats.size} bytes)...`);
 
-  // FUENTE 3: Fallback a YouTube con emulación de cliente Android
-  console.log(`[Paso 3/3 - Fallback]: Intentando YouTube con emulación de cliente Android...`);
-  const ytAndroidExito = await intentarStreamYtDlp(
-    `ytsearch1:${busqueda}`,
-    {
-      format: 'bestaudio',
-      output: '-',
-      extractorArgs: 'youtube:player_client=android',
-      noCheckCertificates: true,
-      preferFreeFormats: true,
-      noWarnings: true
-    },
-    req,
-    res
-  );
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Length', stats.size);
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(busqueda)}.mp3"`);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-cache');
 
-  if (ytAndroidExito) {
-    console.log(`[Resultado]: Descarga completada vía YouTube Android Client.`);
-    return;
+    return res.sendFile(archivoTemp, (errEnvio) => {
+      if (errEnvio) {
+        console.error('[Error al enviar archivo]:', errEnvio);
+      }
+      limpiarArchivo();
+    });
   }
 
-  // Si ninguna de las 3 fuentes entregó audio
-  if (!res.headersSent && !res.writableEnded) {
-    console.error(`[Error Crítico]: Ningún proveedor (YouTube, SoundCloud, Android) entregó audio para "${busqueda}".`);
+  // Si ninguna fuente logró descargar el archivo completo
+  limpiarArchivo();
+  if (!res.headersSent) {
+    console.error(`[Error Final]: No se pudo descargar la pista completa para "${busqueda}".`);
     return res.status(500).json({
-      error: 'No se recibieron datos de audio del proveedor de contenido. Revisa los registros de Render.'
+      error: 'No se pudo descargar la pista completa en alta fidelidad. Intenta con otro término de búsqueda.'
     });
   }
 }
 
-// 2. Rutas coincidentes del backend para streaming y descarga
+// 2. Rutas del backend
 app.get('/descargar', manejarDescargaAudio);
 app.get('/buscar', manejarDescargaAudio);
 app.get('/stream', manejarDescargaAudio);
@@ -225,6 +177,6 @@ app.listen(PUERTO, '0.0.0.0', () => {
   console.log(` Aplicación web y API: http://localhost:${PUERTO}`);
   console.log(` Sirviendo frontend desde carpeta local: ${RUTA_DIST}`);
   console.log(` Chequeo de actividad: http://localhost:${PUERTO}/health`);
-  console.log(` Motor de Audio Multifuente: YouTube + SoundCloud Fallback`);
+  console.log(` Motor: Descarga Completa a Disco + Conversión MP3 con ffmpeg`);
   console.log(`=======================================================`);
 });
