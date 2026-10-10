@@ -10,7 +10,7 @@ const app = express();
 const PUERTO = process.env.PORT || 4000;
 const RUTA_DIST = path.join(__dirname, 'dist');
 
-// Middleware y CORS
+// Middleware y cabeceras CORS
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -20,7 +20,7 @@ app.use(cors({
 
 app.use(express.json());
 
-// 1. Endpoint de chequeo de salud / actividad (Requerido para Render)
+// Endpoint de chequeo de salud y actividad para Render
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -31,10 +31,11 @@ app.get('/health', (req, res) => {
 });
 
 /**
- * Descarga y extrae audio completo en disco temporal en formato MP3 (alta fidelidad)
- * utilizando el binario estático de FFmpeg (@ffmpeg-installer/ffmpeg).
- * Si YouTube bloquea la petición por ser IP de datacenter (ej. Render), recurre automáticamente a SoundCloud.
- * El archivo temporal se transmite con res.sendFile() y se elimina con fs.unlink.
+ * Descarga de audio optimizada para Render y centros de datos:
+ * 1. Prioriza SoundCloud (scsearch) porque NO bloquea las IPs de Render ni requiere login.
+ * 2. Si SoundCloud falla, recurre a YouTube utilizando los clientes móviles (ios, android) para evitar bloqueos web.
+ * 3. Descarga con formato nativo de mejor audio (-f "ba/bestaudio/best") y extrae a MP3 mediante FFmpeg estático.
+ * 4. Valida tamaño > 200 KB, envía con res.sendFile y elimina el archivo temporal tras 'finish'.
  */
 async function manejarDescargaAudio(req, res) {
   const busqueda = req.query.q;
@@ -46,94 +47,104 @@ async function manejarDescargaAudio(req, res) {
   const archivoTemp = path.join(os.tmpdir(), `${idTemp}.mp3`);
 
   console.log(`\n======================================================================`);
-  console.log(`[${new Date().toLocaleTimeString()}] Nueva descarga solicitada: "${busqueda}"`);
+  console.log(`[${new Date().toLocaleTimeString()}] Petición de descarga: "${busqueda}"`);
   console.log(`[Archivo Temporal]: ${archivoTemp}`);
-  console.log(`[FFmpeg Path]: ${ffmpeg.path}`);
 
-  const borrarArchivo = () => {
+  const eliminarArchivoTemporal = () => {
     try {
-      fs.unlink(archivoTemp, () => {});
+      if (fs.existsSync(archivoTemp)) {
+        fs.unlink(archivoTemp, (err) => {
+          if (!err) {
+            console.log(`[Limpieza]: Archivo temporal eliminado correctamente.`);
+          }
+        });
+      }
     } catch (_) {}
   };
 
-  // Limpieza de seguridad si el cliente aborta la conexión
+  // Eliminar el archivo si el cliente cancela o desconecta la petición antes de tiempo
   res.on('close', () => {
     if (!res.writableEnded) {
-      borrarArchivo();
+      eliminarArchivoTemporal();
     }
   });
 
   try {
     let exito = false;
 
-    // 1. Intento principal: YouTube
+    // -------------------------------------------------------------
+    // PASO 1: PRIORIDAD SOUNDCLOUD (Evita bloqueos de IP en Render)
+    // -------------------------------------------------------------
     try {
-      console.log(`[Paso 1/2]: Intentando descarga completa desde YouTube...`);
-      await ytdlp(`ytsearch1:${busqueda}`, {
+      console.log(`[Paso 1/2]: Buscando y descargando desde SoundCloud...`);
+      await ytdlp(`scsearch5:${busqueda}`, {
+        format: 'ba/bestaudio/best',
         extractAudio: true,
         audioFormat: 'mp3',
-        audioQuality: 0,
         ffmpegLocation: ffmpeg.path,
         output: archivoTemp,
         noPlaylist: true,
-        matchFilter: 'duration > 60',
+        noWarnings: true,
         noCheckCertificates: true,
-        preferFreeFormats: true,
-        noWarnings: true
+        maxDownloads: 1,
+        ignoreErrors: true
       });
 
       if (fs.existsSync(archivoTemp)) {
         const stats = fs.statSync(archivoTemp);
-        if (stats.size >= 1024 * 1024) { // Más de 1 MB
-          console.log(`[Éxito YouTube]: Archivo generado correctamente (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+        if (stats.size > 200 * 1024) { // Mayor a 200 KB
+          console.log(`[Éxito SoundCloud]: Archivo obtenido (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
           exito = true;
         } else {
-          console.warn(`[Aviso YouTube]: Archivo incompleto o inferior a 1 MB (${stats.size} bytes). Intentando SoundCloud...`);
-          borrarArchivo();
+          console.warn(`[SoundCloud]: Archivo descargado menor a 200 KB (${stats.size} bytes).`);
+          eliminarArchivoTemporal();
         }
       }
-    } catch (errYt) {
-      console.warn(`[YouTube bloqueado o falló]: ${errYt.message || errYt}. Activando fallback a SoundCloud...`);
-      borrarArchivo();
+    } catch (errSc) {
+      console.warn(`[SoundCloud no disponible]: ${errSc.message || errSc}. Pasando a YouTube...`);
+      eliminarArchivoTemporal();
     }
 
-    // 2. Fallback automático: SoundCloud (Pistas completas sin preview para Datacenters)
+    // -------------------------------------------------------------
+    // PASO 2: FALLBACK YOUTUBE (Clientes móviles ios/android sin login)
+    // -------------------------------------------------------------
     if (!exito) {
       try {
-        console.log(`[Paso 2/2 - Fallback]: Intentando descarga completa desde SoundCloud (scsearch1)...`);
-        await ytdlp(`scsearch1:${busqueda}`, {
+        console.log(`[Paso 2/2 - Fallback]: Buscando en YouTube con clientes móviles (ios,android)...`);
+        await ytdlp(`ytsearch1:${busqueda}`, {
+          format: 'ba/bestaudio/best',
           extractAudio: true,
           audioFormat: 'mp3',
-          audioQuality: 0,
           ffmpegLocation: ffmpeg.path,
           output: archivoTemp,
           noPlaylist: true,
-          matchFilter: 'duration > 60',
+          noWarnings: true,
           noCheckCertificates: true,
-          preferFreeFormats: true,
-          noWarnings: true
+          extractorArgs: 'youtube:player_client=ios,android'
         });
 
         if (fs.existsSync(archivoTemp)) {
           const stats = fs.statSync(archivoTemp);
-          if (stats.size >= 1024 * 1024) { // Más de 1 MB
-            console.log(`[Éxito SoundCloud]: Archivo generado correctamente (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+          if (stats.size > 200 * 1024) { // Mayor a 200 KB
+            console.log(`[Éxito YouTube]: Archivo obtenido (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
             exito = true;
           } else {
-            console.warn(`[Aviso SoundCloud]: Archivo inferior a 1 MB (${stats.size} bytes).`);
-            borrarArchivo();
+            console.warn(`[YouTube]: Archivo descargado menor a 200 KB (${stats.size} bytes).`);
+            eliminarArchivoTemporal();
           }
         }
-      } catch (errSc) {
-        console.error(`[SoundCloud falló]: ${errSc.message || errSc}`);
-        borrarArchivo();
+      } catch (errYt) {
+        console.error(`[YouTube falló]: ${errYt.message || errYt}`);
+        eliminarArchivoTemporal();
       }
     }
 
-    // 3. Envío del archivo completo al cliente y posterior borrado
+    // -------------------------------------------------------------
+    // PASO 3: ENVÍO DEL ARCHIVO Y LIMPIEZA
+    // -------------------------------------------------------------
     if (exito && fs.existsSync(archivoTemp)) {
       const stats = fs.statSync(archivoTemp);
-      console.log(`[Enviando MP3]: Transmitiendo archivo completo al cliente (${stats.size} bytes)...`);
+      console.log('[DESCARGA EXITOSA]: Enviando archivo al cliente');
 
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', stats.size);
@@ -141,45 +152,47 @@ async function manejarDescargaAudio(req, res) {
       res.setHeader('Accept-Ranges', 'bytes');
       res.setHeader('Cache-Control', 'no-cache');
 
+      // Al completar el envío de la respuesta, eliminar el archivo temporal
+      res.on('finish', () => {
+        eliminarArchivoTemporal();
+      });
+
       return res.sendFile(archivoTemp, (errEnvio) => {
-        // Borrar el archivo temporal con fs.unlink una vez enviado
-        borrarArchivo();
         if (errEnvio) {
-          console.error('[Error durante el envío de sendFile]:', errEnvio.message || errEnvio);
-        } else {
-          console.log(`[Envío Exitoso]: Canción "${busqueda}" transmitida y archivo temporal eliminado.`);
+          console.error('[Error enviando archivo]:', errEnvio.message || errEnvio);
+          eliminarArchivoTemporal();
         }
       });
     }
 
-    // Si ninguna fuente logró descargar el audio
-    borrarArchivo();
+    // Si ninguna fuente obtuvo la pista
+    eliminarArchivoTemporal();
     if (!res.headersSent) {
-      console.error(`[Error Final]: No se pudo descargar audio completo para "${busqueda}".`);
+      console.error(`[Fallo Definitivo]: No se pudo descargar la pista para "${busqueda}".`);
       return res.status(500).json({
         error: 'No se pudo descargar la pista completa de audio. Intenta con otro término de búsqueda.'
       });
     }
   } catch (errorGeneral) {
-    borrarArchivo();
-    console.error('[Error no controlado en descarga]:', errorGeneral);
+    eliminarArchivoTemporal();
+    console.error('[Error General]:', errorGeneral);
     if (!res.headersSent) {
       return res.status(500).json({
-        error: errorGeneral.message || 'Error interno del servidor al procesar la descarga de audio.'
+        error: errorGeneral.message || 'Error interno del servidor al procesar el audio'
       });
     }
   }
 }
 
-// 2. Rutas del backend
+// Rutas de API
 app.get('/descargar', manejarDescargaAudio);
 app.get('/buscar', manejarDescargaAudio);
 app.get('/stream', manejarDescargaAudio);
 
-// 3. Servir archivos estáticos del frontend compilado desde ./dist local
+// Servir estáticos de la PWA compilada
 app.use(express.static(RUTA_DIST));
 
-// 4. Fallback para SPA y PWA: cualquier ruta GET no API devuelve ./dist/index.html
+// Fallback SPA/PWA
 app.use((req, res, next) => {
   if (req.method !== 'GET') {
     return next();
@@ -195,10 +208,9 @@ app.use((req, res, next) => {
 
 app.listen(PUERTO, '0.0.0.0', () => {
   console.log(`=======================================================`);
-  console.log(` Servidor Express Unificado Activo en Puerto ${PUERTO}`);
+  console.log(` Servidor Express Activo en Puerto ${PUERTO}`);
   console.log(` Aplicación web y API: http://localhost:${PUERTO}`);
-  console.log(` Sirviendo frontend desde carpeta local: ${RUTA_DIST}`);
-  console.log(` Chequeo de actividad: http://localhost:${PUERTO}/health`);
-  console.log(` Motor: FFmpeg (@ffmpeg-installer/ffmpeg) + yt-dlp + Fallback SoundCloud`);
+  console.log(` Servidor estático: ${RUTA_DIST}`);
+  console.log(` Motor: SoundCloud Primario + YouTube Clientes Móviles`);
   console.log(`=======================================================`);
 });
