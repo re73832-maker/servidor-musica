@@ -9,9 +9,8 @@ const app = express();
 const PUERTO = process.env.PORT || 4000;
 const RUTA_DIST = path.join(__dirname, 'dist');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const TAMANO_MINIMO = 1048576; // 1 MB (1048576 bytes): mínimo absoluto para audio completo
 
-// Middleware y CORS
+// Middleware y CORS abierto
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -21,88 +20,22 @@ app.use(cors({
 
 app.use(express.json());
 
-// Endpoint de chequeo de salud / actividad para Render
+// Endpoint de chequeo de salud para Render
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
     port: PUERTO,
-    engine: 'YouTube Official + Cobalt + Invidious/Piped + Direct MP3 + Guaranteed Fallback'
+    mode: 'client-direct-download + direct-link-resolver'
   });
 });
 
-/**
- * Descarga y valida un stream de audio remoto en memoria:
- * 1. Verifica HTTP status 200.
- * 2. Si content-type es text/html o application/json, lo DESCARTA.
- * 3. Si content-length existe y es menor a 1 MB, lo DESCARTA.
- * 4. Acumula chunks contando bytes. Si el stream se corta antes de 1 MB, lo DESCARTA.
- */
-async function descargarYValidarAudio(streamUrl, headersExtra = {}, etiqueta = 'Stream') {
-  console.log(`[Validando ${etiqueta}]: Solicitando stream desde ${streamUrl.substring(0, 80)}...`);
-
-  const resp = await axios.get(streamUrl, {
-    responseType: 'stream',
-    timeout: 35000,
-    headers: {
-      'User-Agent': UA,
-      'Accept': '*/*',
-      ...headersExtra
-    },
-    validateStatus: () => true
-  });
-
-  if (resp.status !== 200) {
-    throw new Error(`${etiqueta}: HTTP status ${resp.status}`);
-  }
-
-  const cType = String(resp.headers['content-type'] || '').toLowerCase();
-  const cLen = parseInt(resp.headers['content-length'] || '0', 10);
-
-  // Validación de Content-Type
-  if (cType.includes('text/html') || cType.includes('application/json')) {
-    throw new Error(`${etiqueta}: content-type inválido (${cType}) - posible página de error o captcha`);
-  }
-
-  // Validación de Content-Length previo
-  if (cLen > 0 && cLen < TAMANO_MINIMO) {
-    throw new Error(`${etiqueta}: content-length menor a 1 MB (${cLen} bytes)`);
-  }
-
-  // Descarga controlada de chunks verificando tamaño real recibido
-  const chunks = [];
-  let totalBytes = 0;
-
-  await new Promise((resolve, reject) => {
-    resp.data.on('data', (chunk) => {
-      chunks.push(chunk);
-      totalBytes += chunk.length;
-    });
-
-    resp.data.on('end', () => {
-      resolve();
-    });
-
-    resp.data.on('error', (err) => {
-      reject(new Error(`${etiqueta}: error en transmisión de datos - ${err.message}`));
-    });
-  });
-
-  // Validación final de bytes recibidos
-  if (totalBytes < TAMANO_MINIMO) {
-    throw new Error(`${etiqueta}: stream cortado prematuramente (recibidos ${totalBytes} bytes < 1 MB)`);
-  }
-
-  const buffer = Buffer.concat(chunks);
-  const sizeMB = (buffer.length / (1024 * 1024)).toFixed(2);
-  console.log(`[Validación Exitosa ${etiqueta}]: Descargados ${sizeMB} MB válidos.`);
-  return { buffer, contentType: cType.includes('audio') ? cType : 'audio/mpeg' };
-}
-
 // ---------------------------------------------------------------------------
-// Proveedor 1: Cobalt Instances (sin JWT)
+// Extractores para resolver downloadUrl directa (MP3 / M4A)
 // ---------------------------------------------------------------------------
-async function proveedorCobalt(videoUrl) {
+
+// 1. Cobalt
+async function resolverCobalt(videoUrl) {
   const cobaltInstances = [
     'https://cobalt-api.kwiatekm.tokyo/',
     'https://api.cobalt.0011001100.xyz/',
@@ -112,7 +45,6 @@ async function proveedorCobalt(videoUrl) {
 
   for (const cobaltUrl of cobaltInstances) {
     try {
-      console.log(`[Cobalt]: Probando instancia ${cobaltUrl}...`);
       const cRes = await axios.post(cobaltUrl, {
         url: videoUrl,
         downloadMode: 'audio',
@@ -123,87 +55,61 @@ async function proveedorCobalt(videoUrl) {
           'Content-Type': 'application/json',
           'User-Agent': UA
         },
-        timeout: 5000,
+        timeout: 4500,
         validateStatus: () => true
       });
 
       if (cRes.data && (cRes.data.status === 'tunnel' || cRes.data.status === 'redirect') && cRes.data.url) {
-        console.log(`[Cobalt]: Stream URL obtenida de ${cobaltUrl}, validando descarga...`);
-        const resultado = await descargarYValidarAudio(cRes.data.url, {}, `Cobalt (${cobaltUrl})`);
-        return resultado;
+        console.log(`[Cobalt Éxito]: Resuelto enlace desde ${cobaltUrl}`);
+        return cRes.data.url;
       }
-    } catch (e) {
-      console.warn(`[Cobalt]: Falló ${cobaltUrl} - ${e.message}`);
-    }
+    } catch (_) {}
   }
-
-  throw new Error('Cobalt: ninguna instancia entregó audio válido');
+  return null;
 }
 
-// ---------------------------------------------------------------------------
-// Proveedor 2: Extractor Directo MP3 (Savenow / LBServer con cabeceras completas)
-// ---------------------------------------------------------------------------
-async function proveedorExtractorDirecto(videoUrl) {
-  const dominiosExtractor = [
+// 2. Extractor Directo (Loader / Savenow / LBServer)
+async function resolverExtractorDirecto(videoUrl) {
+  const dominios = [
     'https://p.savenow.to',
     'https://p.lbserver.xyz'
   ];
 
-  for (const dominio of dominiosExtractor) {
+  for (const dominio of dominios) {
     try {
-      console.log(`[Extractor Directo]: Solicitando a ${dominio}...`);
       const startRes = await axios.get(`${dominio}/api/v2/download`, {
         params: { button: 1, format: 'mp3', url: videoUrl },
         headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-        timeout: 8000
+        timeout: 7000
       });
 
-      if (!startRes.data || !startRes.data.id) {
-        continue;
-      }
+      if (!startRes.data || !startRes.data.id) continue;
 
       const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
-      let streamUrl = null;
 
       for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, 1200));
         const pRes = await axios.get(progressUrl, {
           headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-          timeout: 8000
+          timeout: 7000
         });
 
         if (pRes.data && pRes.data.success === 1 && pRes.data.download_url) {
-          streamUrl = pRes.data.download_url;
-          console.log(`[Extractor Directo]: Audio preparado en ${dominio}`);
-          break;
+          console.log(`[Extractor Directo Éxito]: Resuelto enlace desde ${dominio}`);
+          return pRes.data.download_url;
         }
 
         if (pRes.data && pRes.data.text && pRes.data.text.toLowerCase().includes('error')) {
           break;
         }
       }
-
-      if (streamUrl) {
-        // Importante: Enviar Referer: https://loader.to/ para evitar bloqueo de Cloudflare en Render
-        const resultado = await descargarYValidarAudio(
-          streamUrl,
-          { 'Referer': 'https://loader.to/' },
-          `Extractor Directo (${dominio})`
-        );
-        return resultado;
-      }
-    } catch (err) {
-      console.warn(`[Extractor Directo]: Falló ${dominio} - ${err.message}`);
-    }
+    } catch (_) {}
   }
-
-  throw new Error('Extractor Directo: ninguno entregó audio válido');
+  return null;
 }
 
-// ---------------------------------------------------------------------------
-// Proveedor 3: Invidious / Piped Mirrors Públicos
-// ---------------------------------------------------------------------------
-async function proveedorInvidiousPiped(videoId) {
+// 3. Invidious / Piped Mirrors
+async function resolverInvidiousPiped(videoId) {
   const invidiousHosts = [
     'https://invidious.f5.si',
     'https://inv.nadeko.net',
@@ -213,70 +119,51 @@ async function proveedorInvidiousPiped(videoId) {
 
   for (const host of invidiousHosts) {
     try {
-      console.log(`[Invidious]: Probando ${host}...`);
-      // 1. Probar endpoint directo /latest_version
-      const directUrl = `${host}/latest_version?id=${videoId}&itag=140`;
-      try {
-        const res = await descargarYValidarAudio(directUrl, {}, `Invidious Direct (${host})`);
-        return res;
-      } catch (_) {}
-
-      // 2. Probar API de video para formatos adaptativos
-      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, { timeout: 6000, headers: { 'User-Agent': UA } });
+      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, { timeout: 5000, headers: { 'User-Agent': UA } });
       const formatos = (r.data?.adaptiveFormats || []).filter((f) => f.type?.startsWith('audio/') && f.url);
       const mejor = formatos.find((f) => String(f.itag) === '140') || formatos[0];
-
       if (mejor && mejor.url) {
-        const res = await descargarYValidarAudio(mejor.url, {}, `Invidious Audio (${host})`);
-        return res;
+        console.log(`[Invidious Éxito]: Resuelto formato adaptativo desde ${host}`);
+        return mejor.url;
       }
-    } catch (e) {
-      console.warn(`[Invidious]: ${host} falló - ${e.message}`);
-    }
+    } catch (_) {}
   }
 
   const pipedHosts = [
     'https://pipedapi.kavin.rocks',
     'https://pipedapi.leptons.xyz',
-    'https://pipedapi.adminforge.de',
-    'https://api.piped.private.coffee'
+    'https://pipedapi.adminforge.de'
   ];
 
   for (const host of pipedHosts) {
     try {
-      console.log(`[Piped]: Probando ${host}...`);
-      const r = await axios.get(`${host}/streams/${videoId}`, { timeout: 6000, headers: { 'User-Agent': UA } });
+      const r = await axios.get(`${host}/streams/${videoId}`, { timeout: 5000, headers: { 'User-Agent': UA } });
       const mejor = (r.data?.audioStreams || []).filter((a) => a.url).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-
       if (mejor && mejor.url) {
-        const res = await descargarYValidarAudio(mejor.url, {}, `Piped (${host})`);
-        return res;
+        console.log(`[Piped Éxito]: Resuelto audioStream desde ${host}`);
+        return mejor.url;
       }
-    } catch (e) {
-      console.warn(`[Piped]: ${host} falló - ${e.message}`);
-    }
+    } catch (_) {}
   }
 
-  throw new Error('Invidious/Piped: sin stream válido');
+  return null;
 }
 
-// ---------------------------------------------------------------------------
-// Proveedor 4: Fallback Garantizado para Datacenters (SoundCloud API v2 oficial)
-// ---------------------------------------------------------------------------
+// 4. Fallback SoundCloud CDN
 let scClientId = null;
 let scClientIdFecha = 0;
 
 async function obtenerClientIdSoundCloud(forzar = false) {
   if (!forzar && scClientId && Date.now() - scClientIdFecha < 6 * 60 * 60 * 1000) return scClientId;
 
-  const html = (await axios.get('https://soundcloud.com/', { headers: { 'User-Agent': UA }, timeout: 10000 })).data;
+  const html = (await axios.get('https://soundcloud.com/', { headers: { 'User-Agent': UA }, timeout: 8000 })).data;
   const scripts = [...html.matchAll(/<script crossorigin src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)]
     .map((m) => m[1])
     .reverse();
 
   for (const src of scripts) {
     try {
-      const js = (await axios.get(src, { headers: { 'User-Agent': UA }, timeout: 10000 })).data;
+      const js = (await axios.get(src, { headers: { 'User-Agent': UA }, timeout: 8000 })).data;
       const m = js.match(/client_id\s*:\s*"([a-zA-Z0-9]{32})"/) || js.match(/client_id=([a-zA-Z0-9]{32})/);
       if (m) {
         scClientId = m[1];
@@ -288,69 +175,89 @@ async function obtenerClientIdSoundCloud(forzar = false) {
   throw new Error('SoundCloud: no se pudo obtener client_id');
 }
 
-async function proveedorSoundCloudGarantizado(busqueda, duracionRef) {
-  let clientId = await obtenerClientIdSoundCloud();
-  console.log(`[Fallback SoundCloud]: Buscando pista completa para "${busqueda}"...`);
+async function resolverSoundCloud(busqueda, duracionRef) {
+  try {
+    let clientId = await obtenerClientIdSoundCloud();
+    const r = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
+      params: { q: busqueda, client_id: clientId, limit: 12 },
+      headers: { 'User-Agent': UA },
+      timeout: 8000
+    });
 
-  let r = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
-    params: { q: busqueda, client_id: clientId, limit: 15 },
-    headers: { 'User-Agent': UA },
-    timeout: 10000
-  });
+    const pistas = (r.data?.collection || [])
+      .filter((p) => p.policy !== 'SNIP' && p.policy !== 'BLOCK')
+      .filter((p) => p.full_duration > 60000)
+      .filter((p) => Math.abs(p.duration - p.full_duration) < 5000);
 
-  const pistas = (r.data?.collection || [])
-    .filter((p) => p.policy !== 'SNIP' && p.policy !== 'BLOCK')
-    .filter((p) => p.full_duration > 60000)
-    .filter((p) => Math.abs(p.duration - p.full_duration) < 5000);
+    if (!pistas.length) return null;
 
-  if (!pistas.length) {
-    throw new Error('SoundCloud: no se encontraron pistas completas');
-  }
+    let seleccionada = pistas[0];
+    if (duracionRef) {
+      const refMs = duracionRef * 1000;
+      pistas.sort((a, b) => Math.abs(a.full_duration - refMs) - Math.abs(b.full_duration - refMs));
+      seleccionada = pistas[0];
+    }
 
-  // Elegir pista más similar en duración si tenemos duracionRef
-  let seleccionada = pistas[0];
-  if (duracionRef) {
-    const refMs = duracionRef * 1000;
-    pistas.sort((a, b) => Math.abs(a.full_duration - refMs) - Math.abs(b.full_duration - refMs));
-    seleccionada = pistas[0];
-  }
+    const trans = seleccionada.media?.transcodings || [];
+    const progresivo = trans.find((t) => t.format?.protocol === 'progressive')
+      || trans.find((t) => t.format?.mime_type === 'audio/mpeg')
+      || trans[0];
 
-  console.log(`[SoundCloud]: Seleccionada "${seleccionada.title}" (${(seleccionada.full_duration / 1000).toFixed(0)}s)`);
+    if (!progresivo) return null;
 
-  const trans = seleccionada.media?.transcodings || [];
-  const progresivo = trans.find((t) => t.format?.protocol === 'progressive')
-    || trans.find((t) => t.format?.mime_type === 'audio/mpeg')
-    || trans[0];
+    const streamInfo = await axios.get(progresivo.url, {
+      params: { client_id: clientId },
+      headers: { 'User-Agent': UA },
+      timeout: 8000
+    });
 
-  if (!progresivo) throw new Error('SoundCloud: sin transcodificación disponible');
+    if (streamInfo.data?.url) {
+      console.log(`[SoundCloud Fallback Éxito]: Resuelta URL directa de CDN`);
+      return streamInfo.data.url;
+    }
+  } catch (_) {}
+  return null;
+}
 
-  const streamInfo = await axios.get(progresivo.url, {
-    params: { client_id: clientId },
-    headers: { 'User-Agent': UA },
-    timeout: 10000
-  });
+// Función maestra para resolver el enlace de descarga directa
+async function resolverDirectAudioUrl(video, busqueda) {
+  const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
 
-  if (!streamInfo.data?.url) throw new Error('SoundCloud: sin url directa');
+  // Cascada de resolución:
+  // 1. Cobalt
+  let url = await resolverCobalt(videoUrl);
+  if (url) return url;
 
-  const res = await descargarYValidarAudio(streamInfo.data.url, {}, 'SoundCloud Fallback');
-  return res;
+  // 2. Extractor directo (Loader/savenow)
+  url = await resolverExtractorDirecto(videoUrl);
+  if (url) return url;
+
+  // 3. Invidious / Piped
+  url = await resolverInvidiousPiped(video.videoId);
+  if (url) return url;
+
+  // 4. SoundCloud Fallback CDN
+  url = await resolverSoundCloud(busqueda, video.seconds);
+  if (url) return url;
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint Principal de Descarga / Stream
+// ENDPOINT 1: /api/obtener-enlace
+// Devuelve JSON con titulo, artista, duracion y downloadUrl para descarga por cliente
 // ---------------------------------------------------------------------------
-async function manejarDescargaAudio(req, res) {
+app.get('/api/obtener-enlace', async (req, res) => {
   const busqueda = req.query.q;
   if (!busqueda) {
-    return res.status(400).json({ error: 'Debes enviar el nombre de una canción en el parámetro ?q=' });
+    return res.status(400).json({ error: 'Debes enviar el nombre de la canción en ?q=' });
   }
 
   console.log(`\n======================================================================`);
-  console.log(`[${new Date().toLocaleTimeString()}] Solicitud de descarga oficial: "${busqueda}"`);
+  console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/obtener-enlace: "${busqueda}"`);
 
   try {
-    // 1. Búsqueda oficial en YouTube con yt-search
-    console.log(`[Paso 1]: Buscando versión oficial en YouTube...`);
+    // 1. Búsqueda oficial con yt-search
     const consultaBusqueda = `${busqueda} audio oficial`;
     const searchResult = await yts(consultaBusqueda);
     const videos = searchResult && searchResult.videos ? searchResult.videos : [];
@@ -360,76 +267,78 @@ async function manejarDescargaAudio(req, res) {
       || videos[0];
 
     if (!video) {
-      console.warn(`[Aviso]: No se encontraron videos para "${busqueda}".`);
-      return res.status(404).json({ error: 'No se encontró el video oficial en YouTube.' });
+      return res.status(404).json({ error: 'No se encontró la canción oficial en YouTube.' });
     }
 
-    const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
     const trackTitle = video.title || busqueda;
-    console.log(`[Video Oficial]: "${trackTitle}" (${video.timestamp || video.seconds + 's'}) -> ${videoUrl}`);
+    const trackArtist = video.author ? video.author.name : '';
+    const trackDuration = video.seconds || 0;
 
-    // 2. Cascada de Proveedores con Validación Real (> 1 MB, no HTML/JSON)
-    const proveedores = [
-      { nombre: 'Cobalt Instances', fn: () => proveedorCobalt(videoUrl) },
-      { nombre: 'Extractor Directo MP3 (Savenow / LBServer)', fn: () => proveedorExtractorDirecto(videoUrl) },
-      { nombre: 'Invidious / Piped API', fn: () => proveedorInvidiousPiped(video.videoId) },
-      { nombre: 'SoundCloud Datacenter Fallback', fn: () => proveedorSoundCloudGarantizado(busqueda, video.seconds) }
-    ];
+    console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s)`);
 
-    let audioResultado = null;
+    // 2. Resolver enlace de descarga directa
+    const downloadUrl = await resolverDirectAudioUrl(video, busqueda);
 
-    for (const prov of proveedores) {
-      if (res.writableEnded || req.socket.destroyed) {
-        console.log(`[Aviso]: Cliente desconectado antes de completar la descarga.`);
-        return;
-      }
-
-      try {
-        console.log(`[Cascada]: Intentando proveedor: ${prov.nombre}...`);
-        audioResultado = await prov.fn();
-        if (audioResultado && audioResultado.buffer && audioResultado.buffer.length >= TAMANO_MINIMO) {
-          console.log(`[Éxito Proveedor]: Proveedor ${prov.nombre} entregó audio válido verificado.`);
-          break;
-        }
-      } catch (errProv) {
-        console.warn(`[Proveedor Descartado]: ${prov.nombre} no entregó audio válido: ${errProv.message}`);
-      }
+    if (!downloadUrl) {
+      console.warn(`[Aviso]: No se pudo resolver la URL directa de audio para "${busqueda}".`);
+      return res.status(502).json({
+        error: 'No se pudo resolver el enlace de descarga directa de ningún proveedor.'
+      });
     }
 
-    // 3. Si se obtuvo audio validado, enviarlo limpiamente al cliente
-    if (audioResultado && audioResultado.buffer) {
-      if (res.writableEnded || req.socket.destroyed) return;
+    console.log(`[Éxito]: Enlace entregado al cliente: ${downloadUrl.substring(0, 80)}...`);
 
-      const { buffer, contentType } = audioResultado;
+    return res.json({
+      titulo: trackTitle,
+      artista: trackArtist,
+      duracion: trackDuration,
+      downloadUrl: downloadUrl
+    });
 
-      res.setHeader('Content-Type', contentType || 'audio/mpeg');
-      res.setHeader('Content-Length', buffer.length);
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(trackTitle)}.mp3"`);
-      res.setHeader('X-Titulo-Audio', encodeURIComponent(trackTitle));
-      res.setHeader('Cache-Control', 'no-cache');
-
-      console.log(`[ÉXITO]: Entregando ${(buffer.length / (1024 * 1024)).toFixed(2)} MB de audio oficial al cliente.`);
-      return res.status(200).end(buffer);
-    }
-
-    // 4. Si el stream se cierra o falla antes de 1 MB en todos los proveedores, emitir error 502
-    console.error(`[Fallo Definitivo]: La descarga fue interrumpida por el proveedor para "${busqueda}".`);
-    if (!res.headersSent) {
-      return res.status(502).json({ error: "La descarga fue interrumpida por el proveedor" });
-    }
-
-  } catch (errorGeneral) {
-    console.error(`[Error no controlado]:`, errorGeneral.message || errorGeneral);
-    if (!res.headersSent) {
-      return res.status(502).json({ error: "La descarga fue interrumpida por el proveedor" });
-    }
+  } catch (error) {
+    console.error(`[Error /api/obtener-enlace]:`, error.message || error);
+    return res.status(500).json({
+      error: 'Error interno al procesar la resolución del enlace de audio.'
+    });
   }
-}
+});
 
-// Rutas de API
-app.get('/descargar', manejarDescargaAudio);
-app.get('/buscar', manejarDescargaAudio);
-app.get('/stream', manejarDescargaAudio);
+// ---------------------------------------------------------------------------
+// ENDPOINT 2: /descargar (Fallback de compatibilidad)
+// ---------------------------------------------------------------------------
+app.get('/descargar', async (req, res) => {
+  const busqueda = req.query.q;
+  if (!busqueda) {
+    return res.status(400).json({ error: 'Debes enviar ?q=' });
+  }
+
+  try {
+    const consultaBusqueda = `${busqueda} audio oficial`;
+    const searchResult = await yts(consultaBusqueda);
+    const videos = searchResult && searchResult.videos ? searchResult.videos : [];
+    const video = videos.find((v) => v.seconds >= 90 && v.seconds <= 480)
+      || videos.find((v) => v.seconds > 60)
+      || videos[0];
+
+    if (!video) {
+      return res.status(404).json({ error: 'No se encontró el video oficial.' });
+    }
+
+    const downloadUrl = await resolverDirectAudioUrl(video, busqueda);
+    if (!downloadUrl) {
+      return res.status(502).json({ error: 'No se pudo obtener enlace de audio.' });
+    }
+
+    // Redireccionar al cliente directamente a la URL de descarga
+    return res.redirect(302, downloadUrl);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Rutas de compatibilidad
+app.get('/buscar', (req, res) => res.redirect(307, `/api/obtener-enlace?q=${encodeURIComponent(req.query.q || '')}`));
+app.get('/stream', (req, res) => res.redirect(307, `/descargar?q=${encodeURIComponent(req.query.q || '')}`));
 
 // Servir estáticos de la PWA compilada
 app.use(express.static(RUTA_DIST));
@@ -452,9 +361,9 @@ if (require.main === module) {
   app.listen(PUERTO, '0.0.0.0', () => {
     console.log(`=======================================================`);
     console.log(` Servidor Express Activo en Puerto ${PUERTO}`);
-    console.log(` Motor: YouTube Oficial + Cobalt + Direct MP3 + Fallback`);
-    console.log(` Validación estricta: > 1 MB + No HTML/Captcha + Error 502`);
-    console.log(` Aplicación web y API: http://localhost:${PUERTO}`);
+    console.log(` Endpoint Directo: GET /api/obtener-enlace?q=...`);
+    console.log(` Descarga realizada directamente por el cliente`);
+    console.log(` Aplicación web: http://localhost:${PUERTO}`);
     console.log(`=======================================================`);
   });
 }
