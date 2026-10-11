@@ -1,44 +1,46 @@
 const axios = require('axios');
 const app = require('./index');
 
-async function testFlujoCompleto() {
-  const puertoTest = 4998;
+async function testProxyStreamFlow() {
+  const puertoTest = 4997;
   const servidor = app.listen(puertoTest, async () => {
-    console.log(`[Test] Servidor local activo en http://localhost:${puertoTest}`);
+    console.log(`[Test] Servidor activo en http://localhost:${puertoTest}`);
     try {
       const cancion = 'mar azul natanael cano';
-      console.log(`[Paso 1 Client]: Llamando a /api/obtener-enlace?q=${encodeURIComponent(cancion)}...`);
+      console.log(`[Paso 1 Frontend]: Obteniendo enlace para "${cancion}"...`);
 
       const resEnlace = await axios.get(`http://localhost:${puertoTest}/api/obtener-enlace`, {
         params: { q: cancion },
         timeout: 45000
       });
 
-      console.log('[Paso 1 Éxito]: Respuesta JSON recibida:', resEnlace.data);
+      console.log('[Paso 1 Éxito]:', resEnlace.data);
       const { downloadUrl, titulo, duracion } = resEnlace.data;
 
       if (!downloadUrl) {
-        throw new Error('No se recibió downloadUrl en la respuesta JSON');
+        throw new Error('No se recibió downloadUrl');
       }
 
-      console.log(`[Paso 2 Client]: Simulando descarga directa desde navegador a ${downloadUrl.substring(0, 80)}...`);
+      console.log(`[Paso 2 Frontend]: Descargando a través del proxy /api/proxy-stream...`);
+      const proxyUrl = `http://localhost:${puertoTest}/api/proxy-stream?url=${encodeURIComponent(downloadUrl)}`;
 
-      const resAudio = await axios.get(downloadUrl, {
+      const resProxy = await axios.get(proxyUrl, {
         responseType: 'arraybuffer',
-        timeout: 45000
+        timeout: 60000
       });
 
-      console.log(`[Paso 2 Éxito]: Status HTTP: ${resAudio.status}`);
-      console.log(`[Paso 2 Éxito]: Content-Type: ${resAudio.headers['content-type']}`);
+      console.log(`[Paso 2 Éxito]: Status HTTP: ${resProxy.status}`);
+      console.log(`[Paso 2 Éxito]: CORS header: ${resProxy.headers['access-control-allow-origin']}`);
+      console.log(`[Paso 2 Éxito]: Content-Type: ${resProxy.headers['content-type']}`);
 
-      const buffer = Buffer.from(resAudio.data);
+      const buffer = Buffer.from(resProxy.data);
       const sizeMB = (buffer.length / (1024 * 1024)).toFixed(2);
-      console.log(`[Paso 2 Éxito]: Tamaño del archivo descargado: ${buffer.length} bytes (${sizeMB} MB)`);
+      console.log(`[Paso 2 Éxito]: Bytes recibidos: ${buffer.length} (${sizeMB} MB)`);
 
       if (buffer.length >= 2 * 1024 * 1024) {
         console.log(`\n======================================================`);
-        console.log(`✅ VERIFICACIÓN PASADA: Canción oficial descargada (${sizeMB} MB > 2 MB).`);
-        console.log(`Título: "${titulo}" | Duración: ${duracion}s`);
+        console.log(`✅ VERIFICACIÓN PASADA: Audio transmitido por proxy sin CORS.`);
+        console.log(`Título: "${titulo}" | Tamaño: ${sizeMB} MB > 2 MB`);
         console.log(`======================================================\n`);
       } else {
         throw new Error(`❌ Tamaño insuficiente (${sizeMB} MB < 2 MB)`);
@@ -52,4 +54,4 @@ async function testFlujoCompleto() {
   });
 }
 
-testFlujoCompleto();
+testProxyStreamFlow();

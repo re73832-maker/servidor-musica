@@ -304,6 +304,77 @@ app.get('/api/obtener-enlace', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// ENDPOINT: /api/proxy-stream
+// Proxy de streaming con CORS abierto para el navegador
+// ---------------------------------------------------------------------------
+app.get('/api/proxy-stream', async (req, res) => {
+  const audioUrl = req.query.url;
+  if (!audioUrl) {
+    return res.status(400).json({ error: 'Debes enviar el parámetro ?url=' });
+  }
+
+  console.log(`\n[/api/proxy-stream]: Transmitiendo stream para: ${audioUrl.substring(0, 80)}...`);
+
+  let axiosStream = null;
+
+  res.on('close', () => {
+    if (axiosStream && typeof axiosStream.destroy === 'function') {
+      axiosStream.destroy();
+    }
+  });
+
+  try {
+    const response = await axios({
+      method: 'get',
+      url: audioUrl,
+      responseType: 'stream',
+      timeout: 60000,
+      headers: {
+        'Referer': 'https://loader.to/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': '*/*'
+      },
+      validateStatus: () => true
+    });
+
+    if (response.status !== 200) {
+      return res.status(response.status).json({
+        error: `Servidor remoto devolvió HTTP ${response.status}`
+      });
+    }
+
+    axiosStream = response.data;
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-cache');
+
+    if (response.headers['content-length']) {
+      res.setHeader('Content-Length', response.headers['content-length']);
+    }
+    if (response.headers['content-disposition']) {
+      res.setHeader('Content-Disposition', response.headers['content-disposition']);
+    }
+
+    response.data.pipe(res);
+
+    response.data.on('error', (errStream) => {
+      console.error('[/api/proxy-stream Error]:', errStream.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error durante la transmisión del proxy' });
+      }
+    });
+
+  } catch (error) {
+    console.error('[/api/proxy-stream Error Catch]:', error.message);
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'No se pudo conectar con el origen del archivo' });
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
 // ENDPOINT 2: /descargar (Fallback de compatibilidad)
 // ---------------------------------------------------------------------------
 app.get('/descargar', async (req, res) => {
