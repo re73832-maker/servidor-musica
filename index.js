@@ -248,6 +248,10 @@ async function resolverDirectAudioUrl(video, busqueda) {
 // Devuelve JSON con titulo, artista, duracion y downloadUrl para descarga por cliente
 // ---------------------------------------------------------------------------
 app.get('/api/obtener-enlace', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+
   const busqueda = req.query.q;
   if (!busqueda) {
     return res.status(400).json({ error: 'Debes enviar el nombre de la canción en ?q=' });
@@ -308,6 +312,10 @@ app.get('/api/obtener-enlace', async (req, res) => {
 // Proxy de streaming con CORS abierto para el navegador
 // ---------------------------------------------------------------------------
 app.get('/api/proxy-stream', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+
   const audioUrl = req.query.url;
   if (!audioUrl) {
     return res.status(400).json({ error: 'Debes enviar el parámetro ?url=' });
@@ -343,10 +351,14 @@ app.get('/api/proxy-stream', async (req, res) => {
       });
     }
 
-    axiosStream = response.data;
+    const stream = response.data;
+    axiosStream = stream;
 
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'audio/mpeg');
+    const mime = (response.headers['content-type'] && response.headers['content-type'].startsWith('audio/'))
+      ? response.headers['content-type']
+      : 'audio/mpeg';
+
+    res.setHeader('Content-Type', mime);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-cache');
 
@@ -357,14 +369,16 @@ app.get('/api/proxy-stream', async (req, res) => {
       res.setHeader('Content-Disposition', response.headers['content-disposition']);
     }
 
-    response.data.pipe(res);
-
-    response.data.on('error', (errStream) => {
-      console.error('[/api/proxy-stream Error]:', errStream.message);
+    stream.on('error', (err) => {
+      console.error('[/api/proxy-stream Stream Error]:', err.message);
       if (!res.headersSent) {
-        res.status(500).json({ error: 'Error durante la transmisión del proxy' });
+        res.status(502).json({ error: "Fallo al transmitir stream" });
+      } else {
+        res.destroy();
       }
     });
+
+    stream.pipe(res);
 
   } catch (error) {
     console.error('[/api/proxy-stream Error Catch]:', error.message);
