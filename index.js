@@ -7,7 +7,11 @@ const fs = require('fs');
 
 const app = express();
 const PUERTO = process.env.PORT || 4000;
-const RUTA_DIST = path.join(__dirname, 'dist');
+const RUTA_DIST_FRONTEND = path.join(__dirname, '..', 'app-musica', 'dist');
+const RUTA_DIST_LOCAL = path.join(__dirname, 'dist');
+const RUTA_DIST = (fs.existsSync(RUTA_DIST_FRONTEND) && fs.existsSync(path.join(RUTA_DIST_FRONTEND, 'index.html')))
+  ? RUTA_DIST_FRONTEND
+  : RUTA_DIST_LOCAL;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // Middleware y CORS abierto
