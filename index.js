@@ -84,30 +84,39 @@ async function resolverExtractorDirecto(videoUrl) {
       const startRes = await axios.get(`${dominio}/api/v2/download`, {
         params: { button: 1, format: 'mp3', url: videoUrl },
         headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-        timeout: 7000
+        timeout: 8000
       });
 
       if (!startRes.data || !startRes.data.id) continue;
 
       const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
 
-      for (let i = 0; i < 20; i++) {
+      // Polling resiliente con manejo de micro-desconexiones
+      for (let i = 0; i < 25; i++) {
         await new Promise((r) => setTimeout(r, 1200));
-        const pRes = await axios.get(progressUrl, {
-          headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-          timeout: 7000
-        });
+        try {
+          const pRes = await axios.get(progressUrl, {
+            headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
+            timeout: 8000
+          });
 
-        if (pRes.data && pRes.data.success === 1 && pRes.data.download_url) {
-          console.log(`[Extractor Directo Éxito]: Resuelto enlace desde ${dominio}`);
-          return pRes.data.download_url;
-        }
+          if (pRes.data && pRes.data.success === 1 && pRes.data.download_url) {
+            console.log(`[Extractor Directo Éxito]: Resuelto enlace desde ${dominio}`);
+            return pRes.data.download_url;
+          }
 
-        if (pRes.data && pRes.data.text && pRes.data.text.toLowerCase().includes('error')) {
-          break;
+          if (pRes.data && pRes.data.text && pRes.data.text.toLowerCase().includes('error')) {
+            console.warn(`[Extractor Directo]: Error en progreso (${dominio}): ${pRes.data.text}`);
+            break;
+          }
+        } catch (pollErr) {
+          // Si un ping de polling falla por red momentánea, continúa en la siguiente vuelta sin tumbar la descarga
+          console.warn(`[Aviso polling ${dominio}]: ${pollErr.code || pollErr.message}`);
         }
       }
-    } catch (_) {}
+    } catch (errDom) {
+      console.warn(`[Fallo inicio extractor ${dominio}]:`, errDom.code || errDom.message);
+    }
   }
   return null;
 }
@@ -203,9 +212,8 @@ async function resolverSoundCloud(busqueda, duracionRef) {
     }
 
     const trans = seleccionada.media?.transcodings || [];
-    const progresivo = trans.find((t) => t.format?.protocol === 'progressive')
-      || trans.find((t) => t.format?.mime_type === 'audio/mpeg')
-      || trans[0];
+    // ACEPTAR ÚNICAMENTE PROTOCOLO PROGRESSIVE (NUNCA HLS / .M3U8)
+    const progresivo = trans.find((t) => t.format?.protocol === 'progressive');
 
     if (!progresivo) return null;
 
@@ -216,7 +224,7 @@ async function resolverSoundCloud(busqueda, duracionRef) {
     });
 
     if (streamInfo.data?.url) {
-      console.log(`[SoundCloud Fallback Éxito]: Resuelta URL directa de CDN`);
+      console.log(`[SoundCloud Fallback Éxito]: Resuelta URL directa de audio progresivo`);
       return streamInfo.data.url;
     }
   } catch (_) {}
@@ -227,21 +235,20 @@ async function resolverSoundCloud(busqueda, duracionRef) {
 async function resolverDirectAudioUrl(video, busqueda) {
   const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
 
-  // Cascada de resolución:
-  // 1. Cobalt
-  let url = await resolverCobalt(videoUrl);
+  // 1. Extractor directo (Loader / Savenow / LBServer) -> MÁXIMA VELOCIDAD Y PRIORIDAD
+  let url = await resolverExtractorDirecto(videoUrl);
   if (url) return url;
 
-  // 2. Extractor directo (Loader/savenow)
-  url = await resolverExtractorDirecto(videoUrl);
-  if (url) return url;
-
-  // 3. Invidious / Piped
+  // 2. Invidious / Piped Mirrors
   url = await resolverInvidiousPiped(video.videoId);
   if (url) return url;
 
-  // 4. SoundCloud Fallback CDN
+  // 3. Fallback SoundCloud CDN (SOLO AUDIO PROGRESIVO REAL, NUNCA PLAYLISTS M3U8)
   url = await resolverSoundCloud(busqueda, video.seconds);
+  if (url) return url;
+
+  // 4. Cobalt
+  url = await resolverCobalt(videoUrl);
   if (url) return url;
 
   return null;
@@ -460,6 +467,20 @@ app.get('/api/proxy-stream', async (req, res) => {
     if (response.status !== 200) {
       return res.status(response.status).json({
         error: `Servidor remoto devolvió HTTP ${response.status}`
+      });
+    }
+
+    const contentTypeRemoto = (response.headers['content-type'] || '').toLowerCase();
+    if (
+      contentTypeRemoto.includes('text/html') ||
+      contentTypeRemoto.includes('text/plain') ||
+      contentTypeRemoto.includes('application/vnd.apple.mpegurl') ||
+      contentTypeRemoto.includes('application/x-mpegurl') ||
+      contentTypeRemoto.includes('application/json')
+    ) {
+      console.warn(`[/api/proxy-stream]: Servidor remoto no devolvió audio sino ${contentTypeRemoto}`);
+      return res.status(502).json({
+        error: 'El origen devolvió una respuesta no válida (HTML o playlist en vez de archivo de audio).'
       });
     }
 
