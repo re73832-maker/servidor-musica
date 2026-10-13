@@ -248,6 +248,93 @@ async function resolverDirectAudioUrl(video, busqueda) {
 }
 
 // ---------------------------------------------------------------------------
+// ENDPOINT: /api/buscar-canciones
+// Devuelve lista de canciones coincidentes para que el usuario elija cuál descargar
+// ---------------------------------------------------------------------------
+app.get('/api/buscar-canciones', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+
+  const busqueda = (req.query.q || '').trim();
+  if (!busqueda) {
+    return res.status(400).json({ error: 'Debes enviar el texto de búsqueda en ?q=' });
+  }
+
+  console.log(`\n======================================================================`);
+  console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/buscar-canciones: "${busqueda}"`);
+
+  let videos = [];
+
+  // Intento 1: yt-search con reintentos
+  for (let intento = 0; intento < 3; intento++) {
+    try {
+      const searchResult = await yts(busqueda);
+      if (searchResult && searchResult.videos && searchResult.videos.length > 0) {
+        videos = searchResult.videos;
+        break;
+      }
+    } catch (e) {
+      console.warn(`[yt-search intento ${intento + 1} falló]:`, e.code || e.message);
+      if (intento < 2) await new Promise((r) => setTimeout(r, 600));
+    }
+  }
+
+  // Fallback Invidious si yt-search falló
+  if (!videos || videos.length === 0) {
+    const invidiousHosts = [
+      'https://invidious.nerdvpn.de',
+      'https://inv.nadeko.net',
+      'https://yewtu.be'
+    ];
+    for (const host of invidiousHosts) {
+      try {
+        const resp = await axios.get(`${host}/api/v1/search`, {
+          params: { q: busqueda, type: 'video' },
+          timeout: 5000,
+          headers: { 'User-Agent': UA }
+        });
+        if (Array.isArray(resp.data) && resp.data.length > 0) {
+          videos = resp.data.map((item) => ({
+            videoId: item.videoId,
+            title: item.title,
+            author: { name: item.author || '' },
+            seconds: item.lengthSeconds || 0,
+            timestamp: `${Math.floor((item.lengthSeconds || 0) / 60)}:${(item.lengthSeconds || 0) % 60 < 10 ? '0' : ''}${(item.lengthSeconds || 0) % 60}`,
+            thumbnail: (item.videoThumbnails && item.videoThumbnails[0]) ? item.videoThumbnails[0].url : ''
+          }));
+          break;
+        }
+      } catch (_) {}
+    }
+  }
+
+  // Filtrar canciones individuales (evitar mixes de 2 horas)
+  const filtrados = videos
+    .filter((v) => (v.seconds >= 40 && v.seconds <= 900) || (!v.seconds && v.timestamp))
+    .slice(0, 25);
+
+  const listaFinal = filtrados.length > 0 ? filtrados : videos.slice(0, 15);
+
+  const resultados = listaFinal.map((v) => ({
+    videoId: v.videoId,
+    title: v.title,
+    artist: v.author ? (v.author.name || v.author) : '',
+    timestamp: v.timestamp || `${Math.floor((v.seconds || 0) / 60)}:${(v.seconds || 0) % 60 < 10 ? '0' : ''}${(v.seconds || 0) % 60}`,
+    seconds: v.seconds || 0,
+    thumbnail: v.thumbnail || v.image || ''
+  }));
+
+  console.log(`[Resultados devueltos]: ${resultados.length} canciones para "${busqueda}"`);
+
+  return res.json({
+    consulta: busqueda,
+    total: resultados.length,
+    resultados
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ENDPOINT 1: /api/obtener-enlace
 // Devuelve JSON con titulo, artista, duracion y downloadUrl para descarga por cliente
 // ---------------------------------------------------------------------------
@@ -256,33 +343,54 @@ app.get('/api/obtener-enlace', async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
 
-  const busqueda = req.query.q;
-  if (!busqueda) {
-    return res.status(400).json({ error: 'Debes enviar el nombre de la canción en ?q=' });
+  const busqueda = (req.query.q || '').trim();
+  const videoId = (req.query.videoId || '').trim();
+  const duracionSugerida = parseInt(req.query.seconds) || 0;
+  const artistaSugerido = (req.query.artist || '').trim();
+
+  if (!busqueda && !videoId) {
+    return res.status(400).json({ error: 'Debes enviar ?q= o ?videoId=' });
   }
 
   console.log(`\n======================================================================`);
-  console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/obtener-enlace: "${busqueda}"`);
+  console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/obtener-enlace: "${busqueda}" (videoId: ${videoId || 'auto'})`);
 
   try {
-    // 1. Búsqueda oficial con yt-search
-    const consultaBusqueda = `${busqueda} audio oficial`;
-    const searchResult = await yts(consultaBusqueda);
-    const videos = searchResult && searchResult.videos ? searchResult.videos : [];
+    let video = null;
 
-    const video = videos.find((v) => v.seconds >= 90 && v.seconds <= 480)
-      || videos.find((v) => v.seconds > 60)
-      || videos[0];
+    if (videoId) {
+      video = {
+        videoId: videoId,
+        seconds: duracionSugerida,
+        title: busqueda,
+        author: { name: artistaSugerido }
+      };
+    } else {
+      // 1. Búsqueda oficial con yt-search con reintentos
+      for (let i = 0; i < 3; i++) {
+        try {
+          const consultaBusqueda = `${busqueda} audio oficial`;
+          const searchResult = await yts(consultaBusqueda);
+          const videos = searchResult && searchResult.videos ? searchResult.videos : [];
+          video = videos.find((v) => v.seconds >= 90 && v.seconds <= 480)
+            || videos.find((v) => v.seconds > 60)
+            || videos[0];
+          if (video) break;
+        } catch (e) {
+          if (i < 2) await new Promise((r) => setTimeout(r, 600));
+        }
+      }
+    }
 
     if (!video) {
       return res.status(404).json({ error: 'No se encontró la canción oficial en YouTube.' });
     }
 
     const trackTitle = video.title || busqueda;
-    const trackArtist = video.author ? video.author.name : '';
-    const trackDuration = video.seconds || 0;
+    const trackArtist = (video.author && video.author.name) ? video.author.name : artistaSugerido;
+    const trackDuration = video.seconds || duracionSugerida || 0;
 
-    console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s)`);
+    console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s, ID: ${video.videoId})`);
 
     // 2. Resolver enlace de descarga directa
     const downloadUrl = await resolverDirectAudioUrl(video, busqueda);
