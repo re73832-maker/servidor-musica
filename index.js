@@ -72,10 +72,11 @@ async function resolverCobalt(videoUrl) {
   return null;
 }
 
-// 2. Extractor Directo (Loader / Savenow / LBServer)
+// 2. Extractor Directo (Savenow / Loader / LBServer) -> MÁXIMA COMPATIBILIDAD Y PRIORIDAD
 async function resolverExtractorDirecto(videoUrl) {
   const dominios = [
     'https://p.savenow.to',
+    'https://loader.to',
     'https://p.lbserver.xyz'
   ];
 
@@ -84,25 +85,26 @@ async function resolverExtractorDirecto(videoUrl) {
       const startRes = await axios.get(`${dominio}/api/v2/download`, {
         params: { button: 1, format: 'mp3', url: videoUrl },
         headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-        timeout: 8000
+        timeout: 15000
       });
 
       if (!startRes.data || !startRes.data.id) continue;
 
       const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
 
-      // Polling resiliente con manejo de micro-desconexiones
-      for (let i = 0; i < 25; i++) {
-        await new Promise((r) => setTimeout(r, 1200));
+      // Polling resiliente hasta 30 intentos (aprox 35 segundos)
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1100));
         try {
           const pRes = await axios.get(progressUrl, {
             headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-            timeout: 8000
+            timeout: 10000
           });
 
-          if (pRes.data && pRes.data.success === 1 && pRes.data.download_url) {
-            console.log(`[Extractor Directo Éxito]: Resuelto enlace desde ${dominio}`);
-            return pRes.data.download_url;
+          const downloadLink = pRes.data?.download_url || pRes.data?.url;
+          if (downloadLink && (pRes.data?.success === 1 || pRes.data?.success === true || pRes.data?.progress >= 1000 || pRes.data?.text === 'Finished')) {
+            console.log(`[Extractor Directo Éxito]: Resuelto enlace desde ${dominio}: ${downloadLink.substring(0, 70)}...`);
+            return downloadLink;
           }
 
           if (pRes.data && pRes.data.text && pRes.data.text.toLowerCase().includes('error')) {
@@ -110,7 +112,6 @@ async function resolverExtractorDirecto(videoUrl) {
             break;
           }
         } catch (pollErr) {
-          // Si un ping de polling falla por red momentánea, continúa en la siguiente vuelta sin tumbar la descarga
           console.warn(`[Aviso polling ${dominio}]: ${pollErr.code || pollErr.message}`);
         }
       }
@@ -121,44 +122,26 @@ async function resolverExtractorDirecto(videoUrl) {
   return null;
 }
 
-// 3. Invidious / Piped Mirrors
+// 3. Invidious Mirrors
 async function resolverInvidiousPiped(videoId) {
   const invidiousHosts = [
     'https://invidious.f5.si',
-    'https://inv.nadeko.net',
-    'https://yewtu.be',
-    'https://invidious.nerdvpn.de'
+    'https://inv.tux.pizza',
+    'https://invidious.jing.rocks',
+    'https://yewtu.be'
   ];
 
   for (const host of invidiousHosts) {
     try {
-      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, { timeout: 5000, headers: { 'User-Agent': UA } });
+      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, { timeout: 6000, headers: { 'User-Agent': UA } });
       const formatos = (r.data?.adaptiveFormats || []).filter((f) => f.type?.startsWith('audio/') && f.url);
-      const mejor = formatos.find((f) => String(f.itag) === '140') || formatos[0];
+      const mejor = formatos.find((f) => String(f.itag) === '140') || formatos.find((f) => String(f.itag) === '251') || formatos[0];
       if (mejor && mejor.url) {
         console.log(`[Invidious Éxito]: Resuelto formato adaptativo desde ${host}`);
         return mejor.url;
       }
     } catch (_) {}
   }
-
-  const pipedHosts = [
-    'https://pipedapi.kavin.rocks',
-    'https://pipedapi.leptons.xyz',
-    'https://pipedapi.adminforge.de'
-  ];
-
-  for (const host of pipedHosts) {
-    try {
-      const r = await axios.get(`${host}/streams/${videoId}`, { timeout: 5000, headers: { 'User-Agent': UA } });
-      const mejor = (r.data?.audioStreams || []).filter((a) => a.url).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-      if (mejor && mejor.url) {
-        console.log(`[Piped Éxito]: Resuelto audioStream desde ${host}`);
-        return mejor.url;
-      }
-    } catch (_) {}
-  }
-
   return null;
 }
 
@@ -576,28 +559,67 @@ app.get('/api/descargar-cancion', async (req, res) => {
     const trackTitle = video.title || busqueda;
 
     // 1. Resolver enlace de audio directo
-    const downloadUrl = await resolverDirectAudioUrl(video, busqueda);
+    let downloadUrl = await resolverExtractorDirecto(videoUrl);
+    let fallbackId = video.videoId;
+
+    if (!downloadUrl) {
+      downloadUrl = await resolverInvidiousPiped(video.videoId);
+    }
+
     if (!downloadUrl) {
       return res.status(502).json({
-        error: 'No se pudo generar el enlace de audio para este tema.'
+        error: 'No se pudo generar el enlace de audio para este tema en este momento. Por favor reintenta.'
       });
     }
 
     console.log(`[Descarga Directa]: Transmitiendo audio desde: ${downloadUrl.substring(0, 80)}...`);
 
     // 2. Transmitir el stream directamente al cliente
-    const response = await axios({
-      method: 'get',
-      url: downloadUrl,
-      responseType: 'stream',
-      timeout: 60000,
-      headers: {
-        'Referer': 'https://loader.to/',
-        'User-Agent': UA,
-        'Accept': '*/*'
-      },
-      validateStatus: () => true
-    });
+    let response;
+    try {
+      response = await axios({
+        method: 'get',
+        url: downloadUrl,
+        responseType: 'stream',
+        timeout: 60000,
+        headers: {
+          'Referer': 'https://loader.to/',
+          'User-Agent': UA,
+          'Accept': '*/*'
+        },
+        validateStatus: () => true
+      });
+
+      if (response.status !== 200 && fallbackId) {
+        console.warn(`[Stream Primario HTTP ${response.status}]: Intentando fallback Invidious...`);
+        const altUrl = await resolverInvidiousPiped(fallbackId);
+        if (altUrl) {
+          response = await axios({
+            method: 'get',
+            url: altUrl,
+            responseType: 'stream',
+            timeout: 60000,
+            headers: { 'User-Agent': UA, 'Accept': '*/*' },
+            validateStatus: () => true
+          });
+        }
+      }
+    } catch (errAxios) {
+      if (fallbackId) {
+        const altUrl = await resolverInvidiousPiped(fallbackId);
+        if (altUrl) {
+          response = await axios({
+            method: 'get',
+            url: altUrl,
+            responseType: 'stream',
+            timeout: 60000,
+            headers: { 'User-Agent': UA, 'Accept': '*/*' },
+            validateStatus: () => true
+          });
+        }
+      }
+      if (!response) throw errAxios;
+    }
 
     if (response.status !== 200) {
       return res.status(response.status).json({
