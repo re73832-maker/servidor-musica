@@ -13,17 +13,36 @@
     <link rel="apple-touch-icon" href="/pwa-192x192.png" />
     <link rel="manifest" href="/manifest.json" />
     <title>Música</title>
-    <script type="module" crossorigin src="/assets/index-CFBcFus4.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BI-b9J9b.css">
+    <script type="module" crossorigin src="/assets/index-Dd85xUFP.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CV-S_Edx.css">
   <link rel="manifest" href="/manifest.webmanifest"></head>
   <body>
     <div id="root"></div>
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js').catch((err) => {
-            console.warn('Registro de ServiceWorker opcional falló:', err);
-          });
+          navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+            .then((registration) => {
+              // Chequear actualización inmediatamente al abrir
+              registration.update().catch(() => {});
+              
+              // Chequear periódicamente cada 60 segundos
+              setInterval(() => {
+                registration.update().catch(() => {});
+              }, 60000);
+            })
+            .catch((err) => {
+              console.warn('Registro de ServiceWorker:', err);
+            });
+        });
+
+        // Al volver a la app en el teléfono, verificar inmediatamente si hay versión nueva
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            navigator.serviceWorker.getRegistration().then((reg) => {
+              if (reg) reg.update().catch(() => {});
+            });
+          }
         });
       }
     </script>

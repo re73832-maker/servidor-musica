@@ -557,10 +557,15 @@ app.get('/api/descargar-cancion', async (req, res) => {
     }
 
     const trackTitle = video.title || busqueda;
+    const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
 
-    // 1. Resolver enlace de audio directo
-    let downloadUrl = await resolverExtractorDirecto(videoUrl);
+    // 1. Resolver enlace de audio directo con múltiples proveedores resilientes
+    let downloadUrl = await resolverDirectAudioUrl(video, busqueda);
     let fallbackId = video.videoId;
+
+    if (!downloadUrl) {
+      downloadUrl = await resolverExtractorDirecto(videoUrl);
+    }
 
     if (!downloadUrl) {
       downloadUrl = await resolverInvidiousPiped(video.videoId);
@@ -720,8 +725,36 @@ app.get('/descargar', async (req, res) => {
 app.get('/buscar', (req, res) => res.redirect(307, `/api/obtener-enlace?q=${encodeURIComponent(req.query.q || '')}`));
 app.get('/stream', (req, res) => res.redirect(307, `/descargar?q=${encodeURIComponent(req.query.q || '')}`));
 
+// Middleware anti-caché estricto para archivos de control PWA (sw.js, index.html, manifest)
+// Esto asegura que los teléfonos y navegadores SIEMPRE reciban la versión más reciente al instante.
+app.use((req, res, next) => {
+  const ruta = (req.path || '').toLowerCase();
+  if (
+    ruta === '/sw.js' ||
+    ruta === '/index.html' ||
+    ruta === '/' ||
+    ruta.endsWith('.webmanifest') ||
+    ruta.endsWith('manifest.json')
+  ) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+  }
+  next();
+});
+
 // Servir estáticos de la PWA compilada
-app.use(express.static(RUTA_DIST));
+app.use(express.static(RUTA_DIST, {
+  setHeaders: (res, pathRes) => {
+    const nombre = path.basename(pathRes).toLowerCase();
+    if (nombre === 'sw.js' || nombre === 'index.html' || nombre.endsWith('.webmanifest') || nombre.endsWith('.json')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 // Fallback SPA/PWA
 app.use((req, res, next) => {
@@ -731,6 +764,9 @@ app.use((req, res, next) => {
 
   const archivoIndex = path.join(RUTA_DIST, 'index.html');
   if (fs.existsSync(archivoIndex)) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     return res.sendFile(archivoIndex);
   }
 
