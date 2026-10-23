@@ -97,30 +97,41 @@ async function resolverExtractorDirecto(videoUrl, formatoDeseado = 'mp3') {
       const startRes = await axios.get(`${dominio}/api/v2/download`, {
         params: { button: 1, format: formato, url: videoUrl },
         headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-        timeout: 8000
+        timeout: 10000
       });
 
       if (!startRes.data || !startRes.data.id) continue;
 
       const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
 
-      // Polling ultra rápido cada 650ms hasta 20 intentos (~13 segundos)
-      for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 650));
+      // Polling inteligente cada 1000ms hasta 35 intentos (~35 segundos de tolerancia)
+      for (let i = 0; i < 35; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
         try {
           const pRes = await axios.get(progressUrl, {
             headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-            timeout: 7000
+            timeout: 8000
           });
 
-          const downloadLink = pRes.data?.download_url || pRes.data?.url;
-          if (downloadLink && (pRes.data?.success === 1 || pRes.data?.success === true || pRes.data?.progress >= 1000 || pRes.data?.text === 'Finished')) {
-            console.log(`[Extractor Directo Éxito (${formato})]: Resuelto en intento ${i + 1} desde ${dominio}`);
-            return downloadLink;
+          const pData = pRes.data;
+          if (!pData) continue;
+
+          const downloadLink = pData.download_url || (pData.progress >= 1000 ? pData.url : null);
+          if (
+            downloadLink &&
+            typeof downloadLink === 'string' &&
+            downloadLink.length > 15 &&
+            !downloadLink.includes('b.php') &&
+            !downloadLink.includes('ey43.com') &&
+            (pData.success === 1 || pData.success === true || pData.progress >= 1000 || pData.text === 'Finished')
+          ) {
+            const httpsLink = downloadLink.replace(/^http:\/\//i, 'https://');
+            console.log(`[Extractor Directo Éxito (${formato})]: Resuelto en intento ${i + 1} desde ${dominio} -> ${httpsLink.substring(0, 75)}...`);
+            return httpsLink;
           }
 
-          if (pRes.data && pRes.data.text && pRes.data.text.toLowerCase().includes('error')) {
-            console.warn(`[Extractor Directo]: Error en progreso (${dominio}): ${pRes.data.text}`);
+          if (pData.text && pData.text.toLowerCase().includes('error')) {
+            console.warn(`[Extractor Directo]: Error en progreso (${dominio}): ${pData.text}`);
             break;
           }
         } catch (_) {}
@@ -440,11 +451,15 @@ app.get('/api/proxy-stream', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Type');
 
-  const audioUrl = req.query.url;
+  let audioUrl = (req.query.url || '').trim();
   if (!audioUrl) {
     return res.status(400).json({ error: 'Debes enviar el parámetro ?url=' });
   }
+
+  // Forzar siempre https para evitar bloqueos por Mixed Active Content
+  audioUrl = audioUrl.replace(/^http:\/\//i, 'https://');
 
   console.log(`\n[/api/proxy-stream]: Transmitiendo stream para: ${audioUrl.substring(0, 80)}...`);
 
@@ -461,12 +476,15 @@ app.get('/api/proxy-stream', async (req, res) => {
       method: 'get',
       url: audioUrl,
       responseType: 'stream',
-      timeout: 60000,
+      timeout: 120000,
       headers: {
         'Referer': 'https://loader.to/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': UA,
         'Accept': '*/*'
       },
+      maxRedirects: 5,
+      validateStatus: () => true
+    });
       validateStatus: () => true
     });
 
@@ -596,6 +614,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
       });
     }
 
+    downloadUrl = downloadUrl.replace(/^http:\/\//i, 'https://');
     console.log(`[Descarga Directa (${formatoDeseado})]: Transmitiendo desde: ${downloadUrl.substring(0, 80)}...`);
 
     // 2. Transmitir el stream directamente al cliente
@@ -605,12 +624,13 @@ app.get('/api/descargar-cancion', async (req, res) => {
         method: 'get',
         url: downloadUrl,
         responseType: 'stream',
-        timeout: 60000,
+        timeout: 120000,
         headers: {
           'Referer': 'https://loader.to/',
           'User-Agent': UA,
           'Accept': '*/*'
         },
+        maxRedirects: 5,
         validateStatus: () => true
       });
     } catch (errAxios) {
