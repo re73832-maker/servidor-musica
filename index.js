@@ -72,8 +72,20 @@ async function resolverCobalt(videoUrl) {
   return null;
 }
 
-// 2. Extractor Directo (Savenow / Loader / LBServer) -> MÁXIMA COMPATIBILIDAD Y PRIORIDAD
-async function resolverExtractorDirecto(videoUrl) {
+// Normalizador inteligente de formatos soportados por el motor de descarga
+function normalizarFormato(formato) {
+  if (!formato) return 'mp3';
+  const f = formato.toLowerCase().trim();
+  if (f === 'm4a') return 'm4a';
+  if (f.includes('720') || f.includes('hd')) return '720';
+  if (f.includes('1080')) return '1080';
+  if (f.includes('360') || f.includes('240') || f.includes('144')) return '360';
+  return 'mp3';
+}
+
+// 1. Extractor Directo Ultra Rápido (Savenow / Loader) -> PRIORIDAD #1 ABSOLUTA
+async function resolverExtractorDirecto(videoUrl, formatoDeseado = 'mp3') {
+  const formato = normalizarFormato(formatoDeseado);
   const dominios = [
     'https://p.savenow.to',
     'https://loader.to',
@@ -83,27 +95,27 @@ async function resolverExtractorDirecto(videoUrl) {
   for (const dominio of dominios) {
     try {
       const startRes = await axios.get(`${dominio}/api/v2/download`, {
-        params: { button: 1, format: 'mp3', url: videoUrl },
+        params: { button: 1, format: formato, url: videoUrl },
         headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-        timeout: 15000
+        timeout: 8000
       });
 
       if (!startRes.data || !startRes.data.id) continue;
 
       const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
 
-      // Polling resiliente hasta 30 intentos (aprox 35 segundos)
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 1100));
+      // Polling ultra rápido cada 650ms hasta 20 intentos (~13 segundos)
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 650));
         try {
           const pRes = await axios.get(progressUrl, {
             headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-            timeout: 10000
+            timeout: 7000
           });
 
           const downloadLink = pRes.data?.download_url || pRes.data?.url;
           if (downloadLink && (pRes.data?.success === 1 || pRes.data?.success === true || pRes.data?.progress >= 1000 || pRes.data?.text === 'Finished')) {
-            console.log(`[Extractor Directo Éxito]: Resuelto enlace desde ${dominio}: ${downloadLink.substring(0, 70)}...`);
+            console.log(`[Extractor Directo Éxito (${formato})]: Resuelto en intento ${i + 1} desde ${dominio}`);
             return downloadLink;
           }
 
@@ -111,18 +123,16 @@ async function resolverExtractorDirecto(videoUrl) {
             console.warn(`[Extractor Directo]: Error en progreso (${dominio}): ${pRes.data.text}`);
             break;
           }
-        } catch (pollErr) {
-          console.warn(`[Aviso polling ${dominio}]: ${pollErr.code || pollErr.message}`);
-        }
+        } catch (_) {}
       }
     } catch (errDom) {
-      console.warn(`[Fallo inicio extractor ${dominio}]:`, errDom.code || errDom.message);
+      console.warn(`[Aviso extractor ${dominio}]:`, errDom.message || errDom);
     }
   }
   return null;
 }
 
-// 3. Invidious Mirrors
+// 2. Invidious Mirrors (Fallback secundario)
 async function resolverInvidiousPiped(videoId) {
   const invidiousHosts = [
     'https://invidious.f5.si',
@@ -133,7 +143,7 @@ async function resolverInvidiousPiped(videoId) {
 
   for (const host of invidiousHosts) {
     try {
-      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, { timeout: 6000, headers: { 'User-Agent': UA } });
+      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, { timeout: 3500, headers: { 'User-Agent': UA } });
       const formatos = (r.data?.adaptiveFormats || []).filter((f) => f.type?.startsWith('audio/') && f.url);
       const mejor = formatos.find((f) => String(f.itag) === '140') || formatos.find((f) => String(f.itag) === '251') || formatos[0];
       if (mejor && mejor.url) {
@@ -145,7 +155,7 @@ async function resolverInvidiousPiped(videoId) {
   return null;
 }
 
-// 4. Fallback SoundCloud CDN
+// 3. Fallback SoundCloud CDN
 let scClientId = null;
 let scClientIdFecha = 0;
 
@@ -177,7 +187,7 @@ async function resolverSoundCloud(busqueda, duracionRef) {
     const r = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
       params: { q: busqueda, client_id: clientId, limit: 12 },
       headers: { 'User-Agent': UA },
-      timeout: 8000
+      timeout: 6000
     });
 
     const pistas = (r.data?.collection || [])
@@ -195,7 +205,6 @@ async function resolverSoundCloud(busqueda, duracionRef) {
     }
 
     const trans = seleccionada.media?.transcodings || [];
-    // ACEPTAR ÚNICAMENTE PROTOCOLO PROGRESSIVE (NUNCA HLS / .M3U8)
     const progresivo = trans.find((t) => t.format?.protocol === 'progressive');
 
     if (!progresivo) return null;
@@ -203,7 +212,7 @@ async function resolverSoundCloud(busqueda, duracionRef) {
     const streamInfo = await axios.get(progresivo.url, {
       params: { client_id: clientId },
       headers: { 'User-Agent': UA },
-      timeout: 8000
+      timeout: 6000
     });
 
     if (streamInfo.data?.url) {
@@ -214,32 +223,33 @@ async function resolverSoundCloud(busqueda, duracionRef) {
   return null;
 }
 
-// Función maestra para resolver el enlace de descarga directa
-async function resolverDirectAudioUrl(video, busqueda) {
+// Función maestra para resolver el enlace de descarga directa con soporte de formatos
+async function resolverDirectAudioUrl(video, busqueda, formatoDeseado = 'mp3') {
   const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
 
-  // 1. Extractor directo (Loader / Savenow / LBServer) -> MÁXIMA VELOCIDAD Y PRIORIDAD
-  let url = await resolverExtractorDirecto(videoUrl);
+  // 1. Extractor directo ultra rápido (Savenow / Loader) -> PRIORIDAD #1
+  let url = await resolverExtractorDirecto(videoUrl, formatoDeseado);
   if (url) return url;
 
-  // 2. Invidious / Piped Mirrors
+  // 2. Si el usuario pidió audio (mp3 / m4a), probar SoundCloud CDN
+  if (!formatoDeseado.includes('360') && !formatoDeseado.includes('720') && !formatoDeseado.includes('1080')) {
+    url = await resolverSoundCloud(busqueda, video.seconds);
+    if (url) return url;
+  }
+
+  // 3. Fallback Invidious / Piped Mirrors
   url = await resolverInvidiousPiped(video.videoId);
-  if (url) return url;
-
-  // 3. Fallback SoundCloud CDN (SOLO AUDIO PROGRESIVO REAL, NUNCA PLAYLISTS M3U8)
-  url = await resolverSoundCloud(busqueda, video.seconds);
-  if (url) return url;
-
-  // 4. Cobalt
-  url = await resolverCobalt(videoUrl);
   if (url) return url;
 
   return null;
 }
 
+// Cache de búsquedas en memoria (15 minutos de persistencia) para velocidad instantánea
+const cacheBusquedaCanciones = new Map();
+
 // ---------------------------------------------------------------------------
 // ENDPOINT: /api/buscar-canciones
-// Devuelve lista de canciones coincidentes para que el usuario elija cuál descargar
+// Devuelve lista de canciones coincidentes de forma ultra rápida
 // ---------------------------------------------------------------------------
 app.get('/api/buscar-canciones', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -251,37 +261,43 @@ app.get('/api/buscar-canciones', async (req, res) => {
     return res.status(400).json({ error: 'Debes enviar el texto de búsqueda en ?q=' });
   }
 
+  const claveCache = busqueda.toLowerCase();
+  const cached = cacheBusquedaCanciones.get(claveCache);
+  if (cached && (Date.now() - cached.timestamp < 15 * 60 * 1000)) {
+    console.log(`[Cache Hit /api/buscar-canciones]: "${busqueda}" (${cached.resultados.length} canciones)`);
+    return res.json({
+      consulta: busqueda,
+      total: cached.resultados.length,
+      resultados: cached.resultados
+    });
+  }
+
   console.log(`\n======================================================================`);
   console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/buscar-canciones: "${busqueda}"`);
 
   let videos = [];
 
-  // Intento 1: yt-search con reintentos
-  for (let intento = 0; intento < 3; intento++) {
-    try {
-      const searchResult = await yts(busqueda);
-      if (searchResult && searchResult.videos && searchResult.videos.length > 0) {
-        videos = searchResult.videos;
-        break;
-      }
-    } catch (e) {
-      console.warn(`[yt-search intento ${intento + 1} falló]:`, e.code || e.message);
-      if (intento < 2) await new Promise((r) => setTimeout(r, 600));
+  try {
+    const searchResult = await yts(busqueda);
+    if (searchResult && searchResult.videos && searchResult.videos.length > 0) {
+      videos = searchResult.videos;
     }
+  } catch (e) {
+    console.warn(`[yt-search falló]:`, e.code || e.message);
   }
 
-  // Fallback Invidious si yt-search falló
+  // Fallback rápido si yt-search falló
   if (!videos || videos.length === 0) {
     const invidiousHosts = [
-      'https://invidious.nerdvpn.de',
       'https://inv.nadeko.net',
+      'https://invidious.nerdvpn.de',
       'https://yewtu.be'
     ];
     for (const host of invidiousHosts) {
       try {
         const resp = await axios.get(`${host}/api/v1/search`, {
           params: { q: busqueda, type: 'video' },
-          timeout: 5000,
+          timeout: 4000,
           headers: { 'User-Agent': UA }
         });
         if (Array.isArray(resp.data) && resp.data.length > 0) {
@@ -300,11 +316,11 @@ app.get('/api/buscar-canciones', async (req, res) => {
   }
 
   // Filtrar canciones individuales (evitar mixes de 2 horas)
-  const filtrados = videos
+  const filtrados = (videos || [])
     .filter((v) => (v.seconds >= 40 && v.seconds <= 900) || (!v.seconds && v.timestamp))
     .slice(0, 25);
 
-  const listaFinal = filtrados.length > 0 ? filtrados : videos.slice(0, 15);
+  const listaFinal = filtrados.length > 0 ? filtrados : (videos || []).slice(0, 15);
 
   const resultados = listaFinal.map((v) => ({
     videoId: v.videoId,
@@ -314,6 +330,13 @@ app.get('/api/buscar-canciones', async (req, res) => {
     seconds: v.seconds || 0,
     thumbnail: v.thumbnail || v.image || ''
   }));
+
+  // Guardar en cache para respuestas inmediatas posteriores
+  if (cacheBusquedaCanciones.size > 200) {
+    const primeraClave = cacheBusquedaCanciones.keys().next().value;
+    cacheBusquedaCanciones.delete(primeraClave);
+  }
+  cacheBusquedaCanciones.set(claveCache, { timestamp: Date.now(), resultados });
 
   console.log(`[Resultados devueltos]: ${resultados.length} canciones para "${busqueda}"`);
 
@@ -518,13 +541,14 @@ app.get('/api/descargar-cancion', async (req, res) => {
   const videoId = (req.query.videoId || '').trim();
   const duracionSugerida = parseInt(req.query.seconds) || 0;
   const artistaSugerido = (req.query.artist || '').trim();
+  const formatoDeseado = (req.query.formato || req.query.format || 'mp3').toLowerCase().trim();
 
   if (!busqueda && !videoId) {
     return res.status(400).json({ error: 'Debes enviar ?q= o ?videoId=' });
   }
 
   console.log(`\n======================================================================`);
-  console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/descargar-cancion: "${busqueda}" (videoId: ${videoId || 'auto'})`);
+  console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/descargar-cancion (${formatoDeseado}): "${busqueda}" (videoId: ${videoId || 'auto'})`);
 
   try {
     let video = null;
@@ -559,25 +583,20 @@ app.get('/api/descargar-cancion', async (req, res) => {
     const trackTitle = video.title || busqueda;
     const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
 
-    // 1. Resolver enlace de audio directo con múltiples proveedores resilientes
-    let downloadUrl = await resolverDirectAudioUrl(video, busqueda);
-    let fallbackId = video.videoId;
+    // 1. Resolver enlace directo con el formato solicitado
+    let downloadUrl = await resolverDirectAudioUrl(video, busqueda, formatoDeseado);
 
     if (!downloadUrl) {
-      downloadUrl = await resolverExtractorDirecto(videoUrl);
-    }
-
-    if (!downloadUrl) {
-      downloadUrl = await resolverInvidiousPiped(video.videoId);
+      downloadUrl = await resolverExtractorDirecto(videoUrl, formatoDeseado);
     }
 
     if (!downloadUrl) {
       return res.status(502).json({
-        error: 'No se pudo generar el enlace de audio para este tema en este momento. Por favor reintenta.'
+        error: 'No se pudo generar el enlace para este tema en este momento. Por favor reintenta.'
       });
     }
 
-    console.log(`[Descarga Directa]: Transmitiendo audio desde: ${downloadUrl.substring(0, 80)}...`);
+    console.log(`[Descarga Directa (${formatoDeseado})]: Transmitiendo desde: ${downloadUrl.substring(0, 80)}...`);
 
     // 2. Transmitir el stream directamente al cliente
     let response;
@@ -594,36 +613,9 @@ app.get('/api/descargar-cancion', async (req, res) => {
         },
         validateStatus: () => true
       });
-
-      if (response.status !== 200 && fallbackId) {
-        console.warn(`[Stream Primario HTTP ${response.status}]: Intentando fallback Invidious...`);
-        const altUrl = await resolverInvidiousPiped(fallbackId);
-        if (altUrl) {
-          response = await axios({
-            method: 'get',
-            url: altUrl,
-            responseType: 'stream',
-            timeout: 60000,
-            headers: { 'User-Agent': UA, 'Accept': '*/*' },
-            validateStatus: () => true
-          });
-        }
-      }
     } catch (errAxios) {
-      if (fallbackId) {
-        const altUrl = await resolverInvidiousPiped(fallbackId);
-        if (altUrl) {
-          response = await axios({
-            method: 'get',
-            url: altUrl,
-            responseType: 'stream',
-            timeout: 60000,
-            headers: { 'User-Agent': UA, 'Accept': '*/*' },
-            validateStatus: () => true
-          });
-        }
-      }
-      if (!response) throw errAxios;
+      console.warn(`[Stream Error Axios]:`, errAxios.message);
+      throw errAxios;
     }
 
     if (response.status !== 200) {
@@ -644,14 +636,28 @@ app.get('/api/descargar-cancion', async (req, res) => {
       });
     }
 
-    const mime = (response.headers['content-type'] && response.headers['content-type'].startsWith('audio/'))
-      ? response.headers['content-type']
-      : 'audio/mpeg';
+    const esVideo = formatoDeseado.includes('360') || formatoDeseado.includes('720') || formatoDeseado.includes('1080') || formatoDeseado.includes('144') || formatoDeseado.includes('240');
+    const esM4a = formatoDeseado === 'm4a';
+
+    let mime = 'audio/mpeg';
+    let ext = 'mp3';
+    if (esVideo) {
+      mime = 'video/mp4';
+      ext = 'mp4';
+    } else if (esM4a) {
+      mime = 'audio/mp4';
+      ext = 'm4a';
+    } else if (response.headers['content-type'] && response.headers['content-type'].startsWith('audio/')) {
+      mime = response.headers['content-type'];
+    }
 
     res.setHeader('Content-Type', mime);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('X-Titulo-Audio', encodeURIComponent(trackTitle));
+
+    const safeTitle = trackTitle.replace(/[/\\?%*:|"<>]/g, '_');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.${ext}"`);
 
     if (response.headers['content-length']) {
       res.setHeader('Content-Length', response.headers['content-length']);
