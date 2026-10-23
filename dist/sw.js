@@ -1,1 +1,74 @@
-if(!self.define){let e,i={};const n=(n,s)=>(n=new URL(n+".js",s).href,i[n]||new Promise(i=>{if("document"in self){const e=document.createElement("script");e.src=n,e.onload=i,document.head.appendChild(e)}else e=n,importScripts(n),i()}).then(()=>{let e=i[n];if(!e)throw new Error(`Module ${n} didn’t register its module`);return e}));self.define=(s,r)=>{const t=e||("document"in self?document.currentScript.src:"")||location.href;if(i[t])return;let d={};const o=e=>n(e,t),l={module:{uri:t},exports:d,require:o};i[t]=Promise.all(s.map(e=>l[e]||o(e))).then(e=>(r(...e),d))}}define(["./workbox-9c191d2f"],function(e){"use strict";self.skipWaiting(),e.clientsClaim(),e.precacheAndRoute([{url:"index.html",revision:"3ee08e08589ec796a7cdfdd139b5b8d9"},{url:"assets/index-Dd85xUFP.js",revision:null},{url:"assets/index-CV-S_Edx.css",revision:null},{url:"pwa-192x192.png",revision:"b267fdfab0c408fafd36b79d1e808b2e"},{url:"pwa-512x512.png",revision:"cdc152df64ca61b74df3890a694b2a6c"},{url:"manifest.webmanifest",revision:"0f663ae6ff57554b2cbe07daa16e86db"}],{}),e.cleanupOutdatedCaches(),e.registerRoute(new e.NavigationRoute(e.createHandlerBoundToURL("index.html")))});
+const CACHE_NAME = 'app-musica-v1';
+const ASSETS_TO_CACHE = [
+  '/',
+  '/index.html',
+  '/manifest.json',
+  '/pwa-192x192.png',
+  '/pwa-512x512.png'
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(ASSETS_TO_CACHE);
+    }).then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames
+          .filter((name) => name !== CACHE_NAME)
+          .map((name) => caches.delete(name))
+      );
+    }).then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  // Ignorar peticiones que no sean GET o esquemas no soportados (como chrome-extension)
+  if (event.request.method !== 'GET' || !event.request.url.startsWith('http')) {
+    return;
+  }
+
+  // Las descargas de audio van directo a la red (sin caché del SW para no colapsar la cuota de caché)
+  if (event.request.url.includes('/descargar')) {
+    return;
+  }
+
+  event.respondWith(
+    caches.match(event.request).then((cachedResponse) => {
+      if (cachedResponse) {
+        // Devolver caché e intentar actualizar en segundo plano (stale-while-revalidate)
+        fetch(event.request)
+          .then((networkResponse) => {
+            if (networkResponse && networkResponse.status === 200) {
+              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, networkResponse));
+            }
+          })
+          .catch(() => {});
+        return cachedResponse;
+      }
+
+      return fetch(event.request)
+        .then((networkResponse) => {
+          if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
+            return networkResponse;
+          }
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseToCache);
+          });
+          return networkResponse;
+        })
+        .catch(() => {
+          // Si estamos offline y es navegación HTML, retornar la app principal
+          if (event.request.mode === 'navigate') {
+            return caches.match('/');
+          }
+        });
+    })
+  );
+});
