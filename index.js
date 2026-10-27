@@ -362,6 +362,9 @@ app.get('/api/buscar-canciones', async (req, res) => {
 // ENDPOINT 1: /api/obtener-enlace
 // Devuelve JSON con titulo, artista, duracion y downloadUrl para descarga por cliente
 // ---------------------------------------------------------------------------
+const { streamCacheMiddleware } = require('./middlewares/streamCache');
+app.use('/api/obtener-enlace', streamCacheMiddleware);
+
 app.get('/api/obtener-enlace', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -483,8 +486,6 @@ app.get('/api/proxy-stream', async (req, res) => {
         'Accept': '*/*'
       },
       maxRedirects: 5,
-      validateStatus: () => true
-    });
       validateStatus: () => true
     });
 
@@ -682,9 +683,6 @@ app.get('/api/descargar-cancion', async (req, res) => {
     if (response.headers['content-length']) {
       res.setHeader('Content-Length', response.headers['content-length']);
     }
-
-    const safeTitle = trackTitle.replace(/[/\\?%*:|"<>]/g, '_');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.mp3"`);
 
     let axiosStream = response.data;
     res.on('close', () => {
