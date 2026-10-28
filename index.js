@@ -234,25 +234,12 @@ async function resolverSoundCloud(busqueda, duracionRef) {
   return null;
 }
 
-// Función maestra para resolver el enlace de descarga directa con soporte de formatos
+const { resolverAudioConCascada, normalizarFormato: normalizarFormatoCascada } = require('./utils/cascadeResolver');
+
+// Función maestra para resolver el enlace de descarga directa con soporte de formatos (Cascada de 3 niveles)
 async function resolverDirectAudioUrl(video, busqueda, formatoDeseado = 'mp3') {
-  const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
-
-  // 1. Extractor directo ultra rápido (Savenow / Loader) -> PRIORIDAD #1
-  let url = await resolverExtractorDirecto(videoUrl, formatoDeseado);
-  if (url) return url;
-
-  // 2. Si el usuario pidió audio (mp3 / m4a), probar SoundCloud CDN
-  if (!formatoDeseado.includes('360') && !formatoDeseado.includes('720') && !formatoDeseado.includes('1080')) {
-    url = await resolverSoundCloud(busqueda, video.seconds);
-    if (url) return url;
-  }
-
-  // 3. Fallback Invidious / Piped Mirrors
-  url = await resolverInvidiousPiped(video.videoId);
-  if (url) return url;
-
-  return null;
+  const res = await resolverAudioConCascada(video, busqueda, formatoDeseado);
+  return res ? res.url : null;
 }
 
 // Cache de búsquedas en memoria (15 minutos de persistencia) para velocidad instantánea
@@ -370,6 +357,29 @@ app.get('/api/obtener-enlace', async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
 
+  let respondido = false;
+  const timeoutGuard = setTimeout(() => {
+    if (!respondido && !res.headersSent) {
+      respondido = true;
+      return res.status(500).json({
+        error: true,
+        mensaje: 'Audio no disponible temporalmente'
+      });
+    }
+  }, 24000);
+
+  const finalizar = (status, payload) => {
+    clearTimeout(timeoutGuard);
+    if (!respondido && !res.headersSent) {
+      respondido = true;
+      return res.status(status).json(payload);
+    }
+  };
+
+  req.on('close', () => {
+    clearTimeout(timeoutGuard);
+  });
+
   const busqueda = (req.query.q || '').trim();
   const videoId = (req.query.videoId || '').trim();
   const duracionSugerida = parseInt(req.query.seconds) || 0;
@@ -377,7 +387,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
   const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
 
   if (!busqueda && !videoId) {
-    return res.status(400).json({ error: 'Debes enviar ?q= o ?videoId=' });
+    return finalizar(400, { error: true, mensaje: 'Debes enviar ?q= o ?videoId=' });
   }
 
   console.log(`\n======================================================================`);
@@ -394,8 +404,8 @@ app.get('/api/obtener-enlace', async (req, res) => {
         author: { name: artistaSugerido }
       };
     } else {
-      // 1. Búsqueda oficial con yt-search con reintentos
-      for (let i = 0; i < 3; i++) {
+      // 1. Búsqueda oficial con yt-search con reintentos rápidos
+      for (let i = 0; i < 2; i++) {
         try {
           const consultaBusqueda = `${busqueda} audio oficial`;
           const searchResult = await yts(consultaBusqueda);
@@ -405,13 +415,13 @@ app.get('/api/obtener-enlace', async (req, res) => {
             || videos[0];
           if (video) break;
         } catch (e) {
-          if (i < 2) await new Promise((r) => setTimeout(r, 600));
+          if (i < 1) await new Promise((r) => setTimeout(r, 400));
         }
       }
     }
 
     if (!video) {
-      return res.status(404).json({ error: 'No se encontró la canción oficial en YouTube.' });
+      return finalizar(404, { error: true, mensaje: 'No se encontró la canción en YouTube' });
     }
 
     const trackTitle = video.title || busqueda;
@@ -420,29 +430,33 @@ app.get('/api/obtener-enlace', async (req, res) => {
 
     console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s, ID: ${video.videoId})`);
 
-    // 2. Resolver enlace de descarga directa con el formato/calidad solicitado
-    const downloadUrl = await resolverDirectAudioUrl(video, busqueda, formatoDeseado);
+    // 2. Resolver enlace con la cascada de 3 niveles y downgrade transparente
+    const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
 
-    if (!downloadUrl) {
-      console.warn(`[Aviso]: No se pudo resolver la URL directa de audio para "${busqueda}".`);
-      return res.status(502).json({
-        error: 'No se pudo resolver el enlace de descarga directa de ningún proveedor.'
+    if (!resultadoAudio || !resultadoAudio.url) {
+      console.warn(`[Aviso Cascada]: No se pudo resolver audio para "${busqueda}".`);
+      return finalizar(500, {
+        error: true,
+        mensaje: 'Audio no disponible temporalmente'
       });
     }
 
-    console.log(`[Éxito]: Enlace entregado al cliente: ${downloadUrl.substring(0, 80)}...`);
+    console.log(`[Éxito Cascada]: Enlace entregado al cliente (${resultadoAudio.calidad} / ${resultadoAudio.proveedor}): ${resultadoAudio.url.substring(0, 80)}...`);
 
-    return res.json({
+    return finalizar(200, {
       titulo: trackTitle,
       artista: trackArtist,
       duracion: trackDuration,
-      downloadUrl: downloadUrl
+      downloadUrl: resultadoAudio.url,
+      calidad: resultadoAudio.calidad,
+      proveedor: resultadoAudio.proveedor
     });
 
   } catch (error) {
     console.error(`[Error /api/obtener-enlace]:`, error.message || error);
-    return res.status(500).json({
-      error: 'Error interno al procesar la resolución del enlace de audio.'
+    return finalizar(500, {
+      error: true,
+      mensaje: 'Audio no disponible temporalmente'
     });
   }
 });
@@ -555,7 +569,37 @@ app.get('/api/descargar-cancion', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, X-Titulo-Audio');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, X-Titulo-Audio, X-Calidad-Audio');
+
+  let respondido = false;
+  let streamActivo = null;
+
+  const timeoutGuard = setTimeout(() => {
+    if (!respondido && !res.headersSent) {
+      respondido = true;
+      if (streamActivo && typeof streamActivo.destroy === 'function') streamActivo.destroy();
+      return res.status(500).json({
+        error: true,
+        mensaje: 'Audio no disponible temporalmente'
+      });
+    }
+  }, 24000);
+
+  const responderError = (status, mensaje) => {
+    clearTimeout(timeoutGuard);
+    if (!respondido && !res.headersSent) {
+      respondido = true;
+      if (streamActivo && typeof streamActivo.destroy === 'function') streamActivo.destroy();
+      return res.status(status).json({ error: true, mensaje });
+    }
+  };
+
+  res.on('close', () => {
+    clearTimeout(timeoutGuard);
+    if (streamActivo && typeof streamActivo.destroy === 'function') {
+      streamActivo.destroy();
+    }
+  });
 
   const busqueda = (req.query.q || '').trim();
   const videoId = (req.query.videoId || '').trim();
@@ -564,7 +608,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
   const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
 
   if (!busqueda && !videoId) {
-    return res.status(400).json({ error: 'Debes enviar ?q= o ?videoId=' });
+    return responderError(400, 'Debes enviar ?q= o ?videoId=');
   }
 
   console.log(`\n======================================================================`);
@@ -581,7 +625,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
         author: { name: artistaSugerido }
       };
     } else {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 2; i++) {
         try {
           const consultaBusqueda = `${busqueda} audio oficial`;
           const searchResult = await yts(consultaBusqueda);
@@ -591,42 +635,35 @@ app.get('/api/descargar-cancion', async (req, res) => {
             || videos[0];
           if (video) break;
         } catch (e) {
-          if (i < 2) await new Promise((r) => setTimeout(r, 600));
+          if (i < 1) await new Promise((r) => setTimeout(r, 400));
         }
       }
     }
 
     if (!video) {
-      return res.status(404).json({ error: 'No se encontró la canción en YouTube.' });
+      return responderError(404, 'No se encontró la canción en YouTube');
     }
 
     const trackTitle = video.title || busqueda;
-    const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
 
-    // 1. Resolver enlace directo con el formato solicitado
-    let downloadUrl = await resolverDirectAudioUrl(video, busqueda, formatoDeseado);
+    // 1. Resolver enlace mediante la cascada de 3 niveles con downgrade transparente
+    const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
 
-    if (!downloadUrl) {
-      downloadUrl = await resolverExtractorDirecto(videoUrl, formatoDeseado);
+    if (!resultadoAudio || !resultadoAudio.url) {
+      return responderError(500, 'Audio no disponible temporalmente');
     }
 
-    if (!downloadUrl) {
-      return res.status(502).json({
-        error: 'No se pudo generar el enlace para este tema en este momento. Por favor reintenta.'
-      });
-    }
+    let downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');
+    console.log(`[Descarga Directa (${resultadoAudio.calidad} / ${resultadoAudio.proveedor})]: Conectando stream...`);
 
-    downloadUrl = downloadUrl.replace(/^http:\/\//i, 'https://');
-    console.log(`[Descarga Directa (${formatoDeseado})]: Transmitiendo desde: ${downloadUrl.substring(0, 80)}...`);
-
-    // 2. Transmitir el stream directamente al cliente
+    // 2. Conectar y transmitir el stream con timeout de conexión seguro
     let response;
     try {
       response = await axios({
         method: 'get',
         url: downloadUrl,
         responseType: 'stream',
-        timeout: 120000,
+        timeout: 15000,
         headers: {
           'Referer': 'https://loader.to/',
           'User-Agent': UA,
@@ -637,13 +674,11 @@ app.get('/api/descargar-cancion', async (req, res) => {
       });
     } catch (errAxios) {
       console.warn(`[Stream Error Axios]:`, errAxios.message);
-      throw errAxios;
+      return responderError(500, 'Audio no disponible temporalmente');
     }
 
     if (response.status !== 200) {
-      return res.status(response.status).json({
-        error: `Servidor remoto devolvió HTTP ${response.status}`
-      });
+      return responderError(response.status, `Servidor remoto devolvió HTTP ${response.status}`);
     }
 
     const contentTypeRemoto = (response.headers['content-type'] || '').toLowerCase();
@@ -653,10 +688,11 @@ app.get('/api/descargar-cancion', async (req, res) => {
       contentTypeRemoto.includes('application/vnd.apple.mpegurl') ||
       contentTypeRemoto.includes('application/x-mpegurl')
     ) {
-      return res.status(502).json({
-        error: 'El origen devolvió una respuesta no válida (HTML o playlist en vez de archivo de audio).'
-      });
+      return responderError(500, 'Audio no disponible temporalmente');
     }
+
+    clearTimeout(timeoutGuard);
+    respondido = true;
 
     const esVideo = formatoDeseado.includes('360') || formatoDeseado.includes('720') || formatoDeseado.includes('1080') || formatoDeseado.includes('144') || formatoDeseado.includes('240');
     const esM4a = formatoDeseado === 'm4a';
@@ -677,6 +713,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('X-Titulo-Audio', encodeURIComponent(trackTitle));
+    res.setHeader('X-Calidad-Audio', resultadoAudio.calidad);
 
     const safeTitle = trackTitle.replace(/[/\\?%*:|"<>]/g, '_');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.${ext}"`);
@@ -686,16 +723,12 @@ app.get('/api/descargar-cancion', async (req, res) => {
     }
 
     let axiosStream = response.data;
-    res.on('close', () => {
-      if (axiosStream && typeof axiosStream.destroy === 'function') {
-        axiosStream.destroy();
-      }
-    });
+    streamActivo = axiosStream;
 
     axiosStream.on('error', (err) => {
       console.error('[/api/descargar-cancion Stream Error]:', err.message);
       if (!res.headersSent) {
-        res.status(502).json({ error: "Fallo al transmitir stream de audio" });
+        res.status(500).json({ error: true, mensaje: 'Audio no disponible temporalmente' });
       } else {
         res.destroy();
       }
@@ -705,11 +738,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
 
   } catch (error) {
     console.error(`[Error /api/descargar-cancion]:`, error.message || error);
-    if (!res.headersSent) {
-      return res.status(500).json({
-        error: 'Error interno al procesar la descarga de audio.'
-      });
-    }
+    return responderError(500, 'Audio no disponible temporalmente');
   }
 });
 
