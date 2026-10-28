@@ -1,14 +1,14 @@
 /**
  * Middleware de Caché en Memoria para URLs de Streaming y Descargas
- * Almacena resoluciones exitosas por `videoId` con un TTL de 4 horas.
- * Desacoplado, no invasivo y protegido contra fugas de memoria con política LRU.
+ * Almacena resoluciones exitosas por `videoId` y calidad/formato con TTL seguro (15 minutos).
+ * Protege contra URLs dinámicas expiradas y preserva CORS y metadatos íntegros.
  */
 
 class StreamMemoryCache {
-  constructor(maxEntries = 500, ttlMs = 4 * 60 * 60 * 1000) {
+  constructor(maxEntries = 500, ttlMs = 15 * 60 * 1000) {
     this.cache = new Map();
     this.maxEntries = maxEntries;
-    this.ttlMs = ttlMs; // 4 Horas
+    this.ttlMs = ttlMs; // 15 Minutos (respetando tiempo de vida de tokens de proveedores)
   }
 
   _normalizarClave(key) {
@@ -39,14 +39,13 @@ class StreamMemoryCache {
     const k = this._normalizarClave(key);
     if (!k || !data) return;
 
-    // Si excede el límite máximo de memoria, retirar el elemento más antiguo
     if (this.cache.size >= this.maxEntries) {
       const primerClave = this.cache.keys().next().value;
       if (primerClave) this.cache.delete(primerClave);
     }
 
     this.cache.set(k, {
-      data,
+      data: { ...data }, // Clon exacto sin mutaciones
       timestamp: Date.now()
     });
   }
@@ -64,7 +63,7 @@ class StreamMemoryCache {
     return {
       entradasActivas: this.cache.size,
       maxEntradas: this.maxEntries,
-      ttlHoras: this.ttlMs / (1000 * 60 * 60)
+      ttlMinutos: this.ttlMs / (1000 * 60)
     };
   }
 }
@@ -72,33 +71,50 @@ class StreamMemoryCache {
 // Instancia singleton para el proceso del servidor
 const streamCache = new StreamMemoryCache();
 
-// Limpieza periódica de expirados cada 30 minutos sin bloquear el event loop
+// Limpieza periódica de expirados cada 10 minutos
 setInterval(() => {
   streamCache.limpiarExpirados();
-}, 30 * 60 * 1000).unref();
+}, 10 * 60 * 1000).unref();
 
 /**
  * Middleware Express no invasivo
  * Intercepta peticiones a la ruta de resolución (/api/obtener-enlace)
  */
 function streamCacheMiddleware(req, res, next) {
+  // Asegurar siempre cabeceras CORS universales
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Type, X-Titulo-Audio, X-Cache-Status');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
   const videoId = (req.query.videoId || '').trim();
   const busqueda = (req.query.q || '').trim();
-  const formato = (req.query.formato || 'mp3').trim().toLowerCase();
+  // Discriminar rigurosamente por formato y calidad (ej. mp3, mp3_320, m4a, 720, etc.)
+  const formato = (req.query.formato || req.query.calidad || req.query.format || 'mp3').trim().toLowerCase();
+  const forzarFresco = req.query.fresco === 'true' || req.query.nocache === 'true' || req.headers['cache-control'] === 'no-cache';
 
   // Clave canónica preferente: videoId_formato o busqueda_formato
   const claveCache = videoId ? `${videoId}_${formato}` : (busqueda ? `${busqueda}_${formato}` : null);
 
-  if (!claveCache) {
+  if (!claveCache || forzarFresco) {
     return next();
   }
 
-  // 1. Acierto en caché (Cache HIT) -> Respuesta instantánea (<1ms)
+  // 1. Acierto en caché (Cache HIT) -> Respuesta instantánea (<1ms) con payload íntegro
   const cacheHit = streamCache.obtener(claveCache);
-  if (cacheHit) {
+  if (cacheHit && cacheHit.downloadUrl) {
     console.log(`[StreamCache HIT]: Entregando enlace en caché para "${claveCache}"`);
     res.setHeader('X-Cache-Status', 'HIT');
-    return res.json(cacheHit);
+    return res.json({
+      titulo: cacheHit.titulo,
+      artista: cacheHit.artista,
+      duracion: cacheHit.duracion,
+      downloadUrl: cacheHit.downloadUrl
+    });
   }
 
   // 2. Fallo de caché (Cache MISS) -> Interceptar res.json de forma no invasiva

@@ -374,6 +374,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
   const videoId = (req.query.videoId || '').trim();
   const duracionSugerida = parseInt(req.query.seconds) || 0;
   const artistaSugerido = (req.query.artist || '').trim();
+  const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
 
   if (!busqueda && !videoId) {
     return res.status(400).json({ error: 'Debes enviar ?q= o ?videoId=' });
@@ -419,8 +420,8 @@ app.get('/api/obtener-enlace', async (req, res) => {
 
     console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s, ID: ${video.videoId})`);
 
-    // 2. Resolver enlace de descarga directa
-    const downloadUrl = await resolverDirectAudioUrl(video, busqueda);
+    // 2. Resolver enlace de descarga directa con el formato/calidad solicitado
+    const downloadUrl = await resolverDirectAudioUrl(video, busqueda, formatoDeseado);
 
     if (!downloadUrl) {
       console.warn(`[Aviso]: No se pudo resolver la URL directa de audio para "${busqueda}".`);
@@ -560,7 +561,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
   const videoId = (req.query.videoId || '').trim();
   const duracionSugerida = parseInt(req.query.seconds) || 0;
   const artistaSugerido = (req.query.artist || '').trim();
-  const formatoDeseado = (req.query.formato || req.query.format || 'mp3').toLowerCase().trim();
+  const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
 
   if (!busqueda && !videoId) {
     return res.status(400).json({ error: 'Debes enviar ?q= o ?videoId=' });
