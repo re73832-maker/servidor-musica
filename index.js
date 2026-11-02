@@ -38,7 +38,7 @@ app.get('/health', (req, res) => {
 // Extractores para resolver downloadUrl directa (MP3 / M4A)
 // ---------------------------------------------------------------------------
 
-// 1. Cobalt
+// 1. Cobalt con AbortSignal.timeout(10000)
 async function resolverCobalt(videoUrl) {
   const cobaltInstances = [
     'https://cobalt-api.kwiatekm.tokyo/',
@@ -59,7 +59,8 @@ async function resolverCobalt(videoUrl) {
           'Content-Type': 'application/json',
           'User-Agent': UA
         },
-        timeout: 4500,
+        signal: AbortSignal.timeout(10000),
+        timeout: 10000,
         validateStatus: () => true
       });
 
@@ -67,7 +68,9 @@ async function resolverCobalt(videoUrl) {
         console.log(`[Cobalt Éxito]: Resuelto enlace desde ${cobaltUrl}`);
         return cRes.data.url;
       }
-    } catch (_) {}
+    } catch (_) {
+      // Aborta y salta inmediatamente al siguiente si no responde en 10s
+    }
   }
   return null;
 }
@@ -83,7 +86,7 @@ function normalizarFormato(formato) {
   return 'mp3';
 }
 
-// 1. Extractor Directo Ultra Rápido (Savenow / Loader) -> PRIORIDAD #1 ABSOLUTA
+// 1. Extractor Directo Ultra Rápido (Savenow / Loader) con AbortSignal.timeout(10000)
 async function resolverExtractorDirecto(videoUrl, formatoDeseado = 'mp3') {
   const formato = normalizarFormato(formatoDeseado);
   const dominios = [
@@ -97,6 +100,7 @@ async function resolverExtractorDirecto(videoUrl, formatoDeseado = 'mp3') {
       const startRes = await axios.get(`${dominio}/api/v2/download`, {
         params: { button: 1, format: formato, url: videoUrl },
         headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
+        signal: AbortSignal.timeout(10000),
         timeout: 10000
       });
 
@@ -104,13 +108,14 @@ async function resolverExtractorDirecto(videoUrl, formatoDeseado = 'mp3') {
 
       const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
 
-      // Polling inteligente cada 1000ms hasta 35 intentos (~35 segundos de tolerancia)
-      for (let i = 0; i < 35; i++) {
-        await new Promise((r) => setTimeout(r, 1000));
+      // Polling inteligente cada 900ms respetando AbortSignal.timeout(10000)
+      for (let i = 0; i < 4; i++) {
+        await new Promise((r) => setTimeout(r, 900));
         try {
           const pRes = await axios.get(progressUrl, {
             headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-            timeout: 8000
+            signal: AbortSignal.timeout(10000),
+            timeout: 10000
           });
 
           const pData = pRes.data;
@@ -143,44 +148,60 @@ async function resolverExtractorDirecto(videoUrl, formatoDeseado = 'mp3') {
   return null;
 }
 
-// 2. Invidious Mirrors (Fallback secundario)
+// 2. Invidious Mirrors con AbortSignal.timeout(10000) (Fallback secundario estándar 160k/128k)
 async function resolverInvidiousPiped(videoId) {
   const invidiousHosts = [
-    'https://invidious.f5.si',
-    'https://inv.tux.pizza',
     'https://invidious.jing.rocks',
-    'https://yewtu.be'
+    'https://inv.nadeko.net',
+    'https://invidious.nerdvpn.de',
+    'https://yewtu.be',
+    'https://invidious.f5.si',
+    'https://inv.tux.pizza'
   ];
 
   for (const host of invidiousHosts) {
     try {
-      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, { timeout: 3500, headers: { 'User-Agent': UA } });
+      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, {
+        signal: AbortSignal.timeout(10000),
+        timeout: 10000,
+        headers: { 'User-Agent': UA }
+      });
       const formatos = (r.data?.adaptiveFormats || []).filter((f) => f.type?.startsWith('audio/') && f.url);
       const mejor = formatos.find((f) => String(f.itag) === '140') || formatos.find((f) => String(f.itag) === '251') || formatos[0];
       if (mejor && mejor.url) {
         console.log(`[Invidious Éxito]: Resuelto formato adaptativo desde ${host}`);
         return mejor.url;
       }
-    } catch (_) {}
+    } catch (_) {
+      // Aborta en 10s y salta inmediatamente al siguiente
+    }
   }
   return null;
 }
 
-// 3. Fallback SoundCloud CDN
+// 3. Fallback SoundCloud CDN con AbortSignal.timeout(10000)
 let scClientId = null;
 let scClientIdFecha = 0;
 
 async function obtenerClientIdSoundCloud(forzar = false) {
   if (!forzar && scClientId && Date.now() - scClientIdFecha < 6 * 60 * 60 * 1000) return scClientId;
 
-  const html = (await axios.get('https://soundcloud.com/', { headers: { 'User-Agent': UA }, timeout: 8000 })).data;
+  const html = (await axios.get('https://soundcloud.com/', {
+    headers: { 'User-Agent': UA },
+    signal: AbortSignal.timeout(10000),
+    timeout: 10000
+  })).data;
   const scripts = [...html.matchAll(/<script crossorigin src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)]
     .map((m) => m[1])
     .reverse();
 
   for (const src of scripts) {
     try {
-      const js = (await axios.get(src, { headers: { 'User-Agent': UA }, timeout: 8000 })).data;
+      const js = (await axios.get(src, {
+        headers: { 'User-Agent': UA },
+        signal: AbortSignal.timeout(10000),
+        timeout: 10000
+      })).data;
       const m = js.match(/client_id\s*:\s*"([a-zA-Z0-9]{32})"/) || js.match(/client_id=([a-zA-Z0-9]{32})/);
       if (m) {
         scClientId = m[1];
@@ -198,7 +219,8 @@ async function resolverSoundCloud(busqueda, duracionRef) {
     const r = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
       params: { q: busqueda, client_id: clientId, limit: 12 },
       headers: { 'User-Agent': UA },
-      timeout: 6000
+      signal: AbortSignal.timeout(10000),
+      timeout: 10000
     });
 
     const pistas = (r.data?.collection || [])
@@ -223,7 +245,8 @@ async function resolverSoundCloud(busqueda, duracionRef) {
     const streamInfo = await axios.get(progresivo.url, {
       params: { client_id: clientId },
       headers: { 'User-Agent': UA },
-      timeout: 6000
+      signal: AbortSignal.timeout(10000),
+      timeout: 10000
     });
 
     if (streamInfo.data?.url) {
@@ -647,7 +670,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
     const trackTitle = video.title || busqueda;
 
     // 1. Resolver enlace mediante la cascada de 3 niveles con downgrade transparente
-    const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
+    let resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
 
     if (!resultadoAudio || !resultadoAudio.url) {
       return responderError(500, 'Audio no disponible temporalmente');
@@ -656,14 +679,14 @@ app.get('/api/descargar-cancion', async (req, res) => {
     let downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');
     console.log(`[Descarga Directa (${resultadoAudio.calidad} / ${resultadoAudio.proveedor})]: Conectando stream...`);
 
-    // 2. Conectar y transmitir el stream con timeout de conexión seguro
-    let response;
-    try {
-      response = await axios({
+    // 2. Conectar y transmitir el stream con timeout inflexible AbortSignal.timeout(10000)
+    async function intentarConectarStream(urlRemota) {
+      return await axios({
         method: 'get',
-        url: downloadUrl,
+        url: urlRemota,
         responseType: 'stream',
-        timeout: 15000,
+        signal: AbortSignal.timeout(10000),
+        timeout: 10000,
         headers: {
           'Referer': 'https://loader.to/',
           'User-Agent': UA,
@@ -672,13 +695,38 @@ app.get('/api/descargar-cancion', async (req, res) => {
         maxRedirects: 5,
         validateStatus: () => true
       });
-    } catch (errAxios) {
-      console.warn(`[Stream Error Axios]:`, errAxios.message);
-      return responderError(500, 'Audio no disponible temporalmente');
     }
 
-    if (response.status !== 200) {
-      return responderError(response.status, `Servidor remoto devolvió HTTP ${response.status}`);
+    let response = null;
+    try {
+      response = await intentarConectarStream(downloadUrl);
+    } catch (errAxios) {
+      console.warn(`[Stream Error Axios (${resultadoAudio.proveedor})]:`, errAxios.message);
+    }
+
+    // Comprobar si el stream de alta calidad falló o saturó
+    const esValido = response && response.status === 200 && (() => {
+      const ct = (response.headers['content-type'] || '').toLowerCase();
+      return !ct.includes('text/html') && !ct.includes('application/json') && !ct.includes('mpegurl');
+    })();
+
+    // DEGRADACIÓN ELEGANTE (Downgrade Transparente): Si 320k falló o saturó, conmutar a flujo estándar
+    if (!esValido) {
+      console.warn(`[Downgrade Transparente]: Proveedor inicial (${resultadoAudio.proveedor}) saturado o fallido. Conmutando a flujo estándar (160k/128k)...`);
+      try {
+        const fallbackAudio = await resolverAudioConCascada(video, busqueda, 'mp3');
+        if (fallbackAudio && fallbackAudio.url && fallbackAudio.url !== downloadUrl) {
+          resultadoAudio = fallbackAudio;
+          downloadUrl = fallbackAudio.url.replace(/^http:\/\//i, 'https://');
+          response = await intentarConectarStream(downloadUrl);
+        }
+      } catch (errFallback) {
+        console.warn(`[Aviso Downgrade]:`, errFallback.message);
+      }
+    }
+
+    if (!response || response.status !== 200) {
+      return responderError(response ? response.status : 502, 'Audio no disponible temporalmente');
     }
 
     const contentTypeRemoto = (response.headers['content-type'] || '').toLowerCase();

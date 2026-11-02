@@ -136,7 +136,21 @@ function streamCacheMiddleware(req, res, next) {
   next();
 }
 
+/**
+ * Helper con AbortSignal.timeout(10000) inflexible para proveedores y extractores de audio.
+ * Si el proveedor no responde en 10 segundos, aborta y rechaza inmediatamente.
+ */
+function crearSignalTimeout10s(tiempoMs = 10000) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(tiempoMs);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new Error(`Timeout de ${tiempoMs}ms excedido`)), tiempoMs).unref();
+  return controller.signal;
+}
+
 module.exports = {
   streamCache,
-  streamCacheMiddleware
+  streamCacheMiddleware,
+  crearSignalTimeout10s
 };
