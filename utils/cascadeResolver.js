@@ -275,8 +275,10 @@ async function probarSoundCloud(busqueda, duracionRef) {
 }
 
 async function resolverNivel2(videoId, busqueda, duracionRef) {
-  const invidiousRes = await probarInvidious(videoId);
-  if (invidiousRes) return invidiousRes;
+  if (videoId && videoId.length === 11 && !videoId.startsWith('itunes_')) {
+    const invidiousRes = await probarInvidious(videoId);
+    if (invidiousRes) return invidiousRes;
+  }
 
   const scRes = await probarSoundCloud(busqueda, duracionRef);
   if (scRes) return scRes;
@@ -337,33 +339,36 @@ async function resolverNivel3(videoUrl) {
 // ---------------------------------------------------------------------------
 async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') {
   const formato = normalizarFormato(formatoDeseado);
-  const videoUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
+  const esYouTubeValido = video && video.videoId && video.videoId.length === 11 && !video.videoId.startsWith('itunes_');
+  const videoUrl = esYouTubeValido ? `https://www.youtube.com/watch?v=${video.videoId}` : null;
   const duracionRef = video.seconds || 0;
 
   console.log(`\n----------------------------------------------------------------------`);
   console.log(`[Cascada de Resiliencia]: Iniciando resolución para "${video.title || busqueda}" (ID: ${video.videoId}, Formato: ${formato})`);
 
   // 1. NIVEL 1: Convertidores de alta calidad (320k: Cobalt / Loader) con AbortSignal.timeout(10000)
-  try {
-    console.log(`[Cascada Nivel 1]: Ejecutando extractores 320k (Cobalt / Loader) con timeout inflexible 10s...`);
-    const res1 = await Promise.race([
-      resolverNivel1(videoUrl, formato),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1 Timeout 10s')), 10000))
-    ]);
+  if (videoUrl) {
+    try {
+      console.log(`[Cascada Nivel 1]: Ejecutando extractores 320k (Cobalt / Loader) con timeout inflexible 10s...`);
+      const res1 = await Promise.race([
+        resolverNivel1(videoUrl, formato),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1 Timeout 10s')), 10000))
+      ]);
 
-    if (res1 && res1.url) {
-      console.log(`[Cascada Éxito Nivel 1]: Audio entregado ${res1.calidad} vía ${res1.proveedor}`);
-      return res1;
+      if (res1 && res1.url) {
+        console.log(`[Cascada Éxito Nivel 1]: Audio entregado ${res1.calidad} vía ${res1.proveedor}`);
+        return res1;
+      }
+    } catch (e1) {
+      console.warn(`[Cascada Nivel 1 Falló o Saturó (${e1.message})]: Aplicando DEGRADACIÓN ELEGANTE a flujo estándar (160k/128k)...`);
     }
-  } catch (e1) {
-    console.warn(`[Cascada Nivel 1 Falló o Saturó (${e1.message})]: Aplicando DEGRADACIÓN ELEGANTE a flujo estándar (160k/128k)...`);
   }
 
   // 2. NIVEL 2: Degradación Elegante a flujo estándar (160k/128k: Invidious / SoundCloud) con AbortSignal.timeout(10000)
   try {
     console.log(`[Cascada Nivel 2 - Downgrade Transparente]: Conmutando a proveedores secundarios (Invidious / SoundCloud)...`);
     const res2 = await Promise.race([
-      resolverNivel2(video.videoId, busqueda, duracionRef),
+      resolverNivel2(esYouTubeValido ? video.videoId : null, busqueda, duracionRef),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 2 Timeout 10s')), 10000))
     ]);
 
@@ -376,19 +381,21 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') 
   }
 
   // 3. NIVEL 3: Salvavidas definitivo (@distube/ytdl-core nativo) con AbortSignal.timeout(10000)
-  try {
-    console.log(`[Cascada Nivel 3 - Salvavidas Nativo]: Extrayendo stream nativo de YouTube...`);
-    const res3 = await Promise.race([
-      resolverNivel3(videoUrl),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 3 Timeout 10s')), 10000))
-    ]);
+  if (videoUrl) {
+    try {
+      console.log(`[Cascada Nivel 3 - Salvavidas Nativo]: Extrayendo stream nativo de YouTube...`);
+      const res3 = await Promise.race([
+        resolverNivel3(videoUrl),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 3 Timeout 10s')), 10000))
+      ]);
 
-    if (res3 && res3.url) {
-      console.log(`[Cascada Completada - SALVAVIDAS NATIVO]: Audio entregado ${res3.calidad} vía ${res3.proveedor}`);
-      return res3;
+      if (res3 && res3.url) {
+        console.log(`[Cascada Completada - SALVAVIDAS NATIVO]: Audio entregado ${res3.calidad} vía ${res3.proveedor}`);
+        return res3;
+      }
+    } catch (e3) {
+      console.warn(`[Cascada Nivel 3 Falló]: ${e3.message}`);
     }
-  } catch (e3) {
-    console.warn(`[Cascada Nivel 3 Falló]: ${e3.message}`);
   }
 
   console.error(`[Cascada Agotada]: Todos los niveles de extracción fallaron para "${busqueda}".`);

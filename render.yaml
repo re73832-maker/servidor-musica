@@ -1,0 +1,16 @@
+# Blueprint declarativo para Render en el repositorio servidor-musica
+services:
+  - type: web
+    name: servidor-musica
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000

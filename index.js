@@ -268,6 +268,49 @@ async function resolverDirectAudioUrl(video, busqueda, formatoDeseado = 'mp3') {
 // Cache de búsquedas en memoria (15 minutos de persistencia) para velocidad instantánea
 const cacheBusquedaCanciones = new Map();
 
+// Helper universal para localizar video en YouTube con yt-search e Invidious
+async function buscarVideoEnYouTube(busqueda, artista = '') {
+  const consulta = `${busqueda} ${artista}`.trim();
+  for (let i = 0; i < 2; i++) {
+    try {
+      const searchResult = await yts(`${consulta} audio oficial`);
+      const videos = searchResult && searchResult.videos ? searchResult.videos : [];
+      const v = videos.find((item) => item.seconds >= 60 && item.seconds <= 600)
+        || videos.find((item) => item.seconds > 40)
+        || videos[0];
+      if (v) return v;
+    } catch (_) {
+      if (i < 1) await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  const invidiousHosts = [
+    'https://inv.nadeko.net',
+    'https://invidious.nerdvpn.de',
+    'https://yewtu.be',
+    'https://invidious.jing.rocks'
+  ];
+  for (const host of invidiousHosts) {
+    try {
+      const resp = await axios.get(`${host}/api/v1/search`, {
+        params: { q: `${consulta} audio`, type: 'video' },
+        timeout: 4500,
+        headers: { 'User-Agent': UA }
+      });
+      if (Array.isArray(resp.data) && resp.data.length > 0) {
+        const item = resp.data[0];
+        return {
+          videoId: item.videoId,
+          title: item.title,
+          seconds: item.lengthSeconds || 0,
+          author: { name: item.author || artista }
+        };
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // ENDPOINT: /api/buscar-canciones
 // Devuelve lista de canciones coincidentes de forma ultra rápida
@@ -307,12 +350,13 @@ app.get('/api/buscar-canciones', async (req, res) => {
     console.warn(`[yt-search falló]:`, e.code || e.message);
   }
 
-  // Fallback rápido si yt-search falló
+  // Fallback 1: Invidious si yt-search falló
   if (!videos || videos.length === 0) {
     const invidiousHosts = [
       'https://inv.nadeko.net',
       'https://invidious.nerdvpn.de',
-      'https://yewtu.be'
+      'https://yewtu.be',
+      'https://invidious.jing.rocks'
     ];
     for (const host of invidiousHosts) {
       try {
@@ -333,6 +377,35 @@ app.get('/api/buscar-canciones', async (req, res) => {
           break;
         }
       } catch (_) {}
+    }
+  }
+
+  // Fallback 2: iTunes Search API oficial (Alta resiliencia sin bloqueo)
+  if (!videos || videos.length === 0) {
+    try {
+      const itunesRes = await axios.get('https://itunes.apple.com/search', {
+        params: { term: busqueda, media: 'music', entity: 'song', limit: 25 },
+        timeout: 5000,
+        headers: { 'User-Agent': UA }
+      });
+      if (itunesRes.data && Array.isArray(itunesRes.data.results) && itunesRes.data.results.length > 0) {
+        videos = itunesRes.data.results.map((item) => {
+          const seg = Math.round((item.trackTimeMillis || 0) / 1000);
+          const min = Math.floor(seg / 60);
+          const rem = seg % 60;
+          return {
+            videoId: `itunes_${item.trackId}`,
+            title: item.trackName || '',
+            author: { name: item.artistName || '' },
+            seconds: seg,
+            timestamp: `${min}:${rem < 10 ? '0' : ''}${rem}`,
+            thumbnail: (item.artworkUrl100 || '').replace('100x100bb', '600x600bb'),
+            previewUrl: item.previewUrl || ''
+          };
+        });
+      }
+    } catch (eItunes) {
+      console.warn('[iTunes search falló]:', eItunes.message);
     }
   }
 
@@ -419,7 +492,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
   try {
     let video = null;
 
-    if (videoId) {
+    if (videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
       video = {
         videoId: videoId,
         seconds: duracionSugerida,
@@ -427,20 +500,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
         author: { name: artistaSugerido }
       };
     } else {
-      // 1. Búsqueda oficial con yt-search con reintentos rápidos
-      for (let i = 0; i < 2; i++) {
-        try {
-          const consultaBusqueda = `${busqueda} audio oficial`;
-          const searchResult = await yts(consultaBusqueda);
-          const videos = searchResult && searchResult.videos ? searchResult.videos : [];
-          video = videos.find((v) => v.seconds >= 90 && v.seconds <= 480)
-            || videos.find((v) => v.seconds > 60)
-            || videos[0];
-          if (video) break;
-        } catch (e) {
-          if (i < 1) await new Promise((r) => setTimeout(r, 400));
-        }
-      }
+      video = await buscarVideoEnYouTube(busqueda, artistaSugerido);
     }
 
     if (!video) {
@@ -640,7 +700,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
   try {
     let video = null;
 
-    if (videoId) {
+    if (videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
       video = {
         videoId: videoId,
         seconds: duracionSugerida,
@@ -648,19 +708,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
         author: { name: artistaSugerido }
       };
     } else {
-      for (let i = 0; i < 2; i++) {
-        try {
-          const consultaBusqueda = `${busqueda} audio oficial`;
-          const searchResult = await yts(consultaBusqueda);
-          const videos = searchResult && searchResult.videos ? searchResult.videos : [];
-          video = videos.find((v) => v.seconds >= 90 && v.seconds <= 480)
-            || videos.find((v) => v.seconds > 60)
-            || videos[0];
-          if (video) break;
-        } catch (e) {
-          if (i < 1) await new Promise((r) => setTimeout(r, 400));
-        }
-      }
+      video = await buscarVideoEnYouTube(busqueda, artistaSugerido);
     }
 
     if (!video) {
@@ -872,7 +920,18 @@ app.use((req, res, next) => {
     return res.sendFile(archivoIndex);
   }
 
-  res.status(404).send('No se encontró el archivo index.html en dist');
+  res.status(200).json({
+    status: 'online',
+    servicio: 'Servidor de Música Backend (API)',
+    health: '/health',
+    puerto: PUERTO,
+    endpoints: [
+      '/api/buscar-canciones?q=...',
+      '/api/descargar-cancion?q=...&videoId=...',
+      '/api/obtener-enlace?q=...',
+      '/api/proxy-stream?url=...'
+    ]
+  });
 });
 
 if (require.main === module) {
