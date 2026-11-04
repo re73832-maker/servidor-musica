@@ -13,3 +13,5 @@ yarn-error.log*
 # Permitir explícitamente la carpeta compilada para GitHub y Render
 !dist/
 !dist/**
+!public/
+!public/**

@@ -7,11 +7,21 @@ const fs = require('fs');
 
 const app = express();
 const PUERTO = process.env.PORT || 4000;
-const RUTA_DIST_FRONTEND = path.join(__dirname, '..', 'app-musica', 'dist');
+const RUTA_PUBLIC = path.join(__dirname, 'public');
 const RUTA_DIST_LOCAL = path.join(__dirname, 'dist');
-const RUTA_DIST = (fs.existsSync(RUTA_DIST_FRONTEND) && fs.existsSync(path.join(RUTA_DIST_FRONTEND, 'index.html')))
-  ? RUTA_DIST_FRONTEND
-  : RUTA_DIST_LOCAL;
+const RUTA_DIST_FRONTEND = path.join(__dirname, '..', 'app-musica', 'dist');
+
+// Orden de resolución para la carpeta de archivos estáticos (OTA / PWA):
+// 1. public/ en servidor-musica (para Render con frontend empaquetado)
+// 2. dist/ en servidor-musica
+// 3. ../app-musica/dist (para monorepo local en desarrollo)
+const RUTA_ESTATICOS = (fs.existsSync(path.join(RUTA_PUBLIC, 'index.html')))
+  ? RUTA_PUBLIC
+  : (fs.existsSync(path.join(RUTA_DIST_LOCAL, 'index.html')))
+    ? RUTA_DIST_LOCAL
+    : (fs.existsSync(path.join(RUTA_DIST_FRONTEND, 'index.html')))
+      ? RUTA_DIST_FRONTEND
+      : RUTA_PUBLIC;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // Middleware y CORS abierto
@@ -895,7 +905,7 @@ app.use((req, res, next) => {
 });
 
 // Servir estáticos de la PWA compilada
-app.use(express.static(RUTA_DIST, {
+app.use(express.static(RUTA_ESTATICOS, {
   setHeaders: (res, pathRes) => {
     const nombre = path.basename(pathRes).toLowerCase();
     if (nombre === 'sw.js' || nombre === 'index.html' || nombre.endsWith('.webmanifest') || nombre.endsWith('.json')) {
@@ -912,7 +922,12 @@ app.use((req, res, next) => {
     return next();
   }
 
-  const archivoIndex = path.join(RUTA_DIST, 'index.html');
+  // Prevenir que rutas de API desconocidas sirvan index.html
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: true, mensaje: 'Endpoint de API no encontrado' });
+  }
+
+  const archivoIndex = path.join(RUTA_ESTATICOS, 'index.html');
   if (fs.existsSync(archivoIndex)) {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
