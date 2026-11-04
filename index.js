@@ -467,12 +467,12 @@ app.get('/api/obtener-enlace', async (req, res) => {
   const timeoutGuard = setTimeout(() => {
     if (!respondido && !res.headersSent) {
       respondido = true;
-      return res.status(500).json({
+      return res.status(504).json({
         error: true,
-        mensaje: 'Audio no disponible temporalmente'
+        mensaje: 'Audio no disponible temporalmente (Tiempo de espera agotado >60s)'
       });
     }
-  }, 24000);
+  }, 65000);
 
   const finalizar = (status, payload) => {
     clearTimeout(timeoutGuard);
@@ -582,24 +582,41 @@ app.get('/api/proxy-stream', async (req, res) => {
     }
   });
 
-  try {
-    const response = await axios({
+  const headersAxios = {
+    'Referer': 'https://loader.to/',
+    'User-Agent': UA,
+    'Accept': '*/*'
+  };
+  if (req.headers.range) {
+    headersAxios['Range'] = req.headers.range;
+  }
+
+  // Petición con soporte de reintento automático y timeout mínimo de 60 segundos
+  const intentarProxy = async (esReintento = false) => {
+    return await axios({
       method: 'get',
       url: audioUrl,
       responseType: 'stream',
-      timeout: 120000,
-      headers: {
-        'Referer': 'https://loader.to/',
-        'User-Agent': UA,
-        'Accept': '*/*'
-      },
+      timeout: 60000,
+      headers: headersAxios,
       maxRedirects: 5,
       validateStatus: () => true
     });
+  };
 
-    if (response.status !== 200) {
-      return res.status(response.status).json({
-        error: `Servidor remoto devolvió HTTP ${response.status}`
+  try {
+    let response = null;
+    try {
+      response = await intentarProxy(false);
+    } catch (eInicial) {
+      console.warn(`[/api/proxy-stream]: Intento 1 falló (${eInicial.message}), aplicando reintento automático...`);
+      await new Promise((r) => setTimeout(r, 600));
+      response = await intentarProxy(true);
+    }
+
+    if (!response || (response.status !== 200 && response.status !== 206)) {
+      return res.status(response ? response.status : 502).json({
+        error: `Servidor remoto devolvió HTTP ${response ? response.status : 'desconectado'}`
       });
     }
 
@@ -627,6 +644,13 @@ app.get('/api/proxy-stream', async (req, res) => {
     res.setHeader('Content-Type', mime);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-cache');
+
+    if (response.headers['content-range']) {
+      res.setHeader('Content-Range', response.headers['content-range']);
+      res.status(206);
+    } else {
+      res.status(200);
+    }
 
     if (response.headers['content-length']) {
       res.setHeader('Content-Length', response.headers['content-length']);
@@ -671,12 +695,12 @@ app.get('/api/descargar-cancion', async (req, res) => {
     if (!respondido && !res.headersSent) {
       respondido = true;
       if (streamActivo && typeof streamActivo.destroy === 'function') streamActivo.destroy();
-      return res.status(500).json({
+      return res.status(504).json({
         error: true,
-        mensaje: 'Audio no disponible temporalmente'
+        mensaje: 'Audio no disponible temporalmente (Tiempo de espera agotado >60s)'
       });
     }
-  }, 24000);
+  }, 65000);
 
   const responderError = (status, mensaje) => {
     clearTimeout(timeoutGuard);
@@ -737,14 +761,14 @@ app.get('/api/descargar-cancion', async (req, res) => {
     let downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');
     console.log(`[Descarga Directa (${resultadoAudio.calidad} / ${resultadoAudio.proveedor})]: Conectando stream...`);
 
-    // 2. Conectar y transmitir el stream con timeout inflexible AbortSignal.timeout(10000)
+    // 2. Conectar y transmitir el stream con timeout de 60 segundos
     async function intentarConectarStream(urlRemota) {
       return await axios({
         method: 'get',
         url: urlRemota,
         responseType: 'stream',
-        signal: AbortSignal.timeout(10000),
-        timeout: 10000,
+        signal: AbortSignal.timeout(60000),
+        timeout: 60000,
         headers: {
           'Referer': 'https://loader.to/',
           'User-Agent': UA,

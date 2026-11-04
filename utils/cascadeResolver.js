@@ -4,8 +4,8 @@ const { Ytdl } = require('@distube/ytdl-core');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const ytdlInstance = new Ytdl();
 
-// Helper seguro para AbortSignal.timeout(10000)
-function getTimeoutSignal(ms = 10000) {
+// Helper seguro para AbortSignal.timeout (mínimo 60000ms por defecto)
+function getTimeoutSignal(ms = 60000) {
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
     return AbortSignal.timeout(ms);
   }
@@ -29,13 +29,15 @@ function normalizarFormato(formato) {
 // NIVEL 1: Extractores rápidos de alta calidad (320 kbps) - Timeout Inflexible 10s
 // ---------------------------------------------------------------------------
 
-// 1.1 Cobalt (AbortSignal.timeout(10000))
+// 1.1 Cobalt (con salto rápido si un mirror no responde)
 async function probarCobalt(videoUrl) {
   const cobaltInstances = [
     'https://cobalt-api.kwiatekm.tokyo/',
     'https://api.cobalt.0011001100.xyz/',
     'https://cobalt.tools.api.alextesting.ninja/',
-    'https://api.savefrom.net/'
+    'https://api.savefrom.net/',
+    'https://cobalt-api.hyper.lol/',
+    'https://api.cobalt.tools/'
   ];
 
   for (const cobaltUrl of cobaltInstances) {
@@ -50,8 +52,8 @@ async function probarCobalt(videoUrl) {
           'Content-Type': 'application/json',
           'User-Agent': UA
         },
-        signal: getTimeoutSignal(10000),
-        timeout: 10000,
+        signal: getTimeoutSignal(6000),
+        timeout: 6000,
         validateStatus: (status) => status === 200
       });
 
@@ -65,13 +67,13 @@ async function probarCobalt(videoUrl) {
         };
       }
     } catch (e) {
-      console.warn(`[Cobalt ${cobaltUrl} Falló/Timeout 10s]:`, e.name === 'CanceledError' || e.name === 'AbortError' ? 'Timeout 10s' : e.message);
+      console.warn(`[Cobalt ${cobaltUrl} Falló]:`, e.name === 'CanceledError' || e.name === 'AbortError' ? 'Timeout' : e.message);
     }
   }
   return null;
 }
 
-// 1.2 Loader / Savenow (AbortSignal.timeout(10000) por llamada y salto rápido)
+// 1.2 Loader / Savenow (con polling de conversión extendido y timeout de 60s)
 async function probarLoaderSavenow(videoUrl, formato) {
   const dominios = [
     'https://p.savenow.to',
@@ -84,8 +86,8 @@ async function probarLoaderSavenow(videoUrl, formato) {
       const startRes = await axios.get(`${dominio}/api/v2/download`, {
         params: { button: 1, format: formato, url: videoUrl },
         headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-        signal: getTimeoutSignal(10000),
-        timeout: 10000,
+        signal: getTimeoutSignal(60000),
+        timeout: 60000,
         validateStatus: (status) => status === 200
       });
 
@@ -93,14 +95,14 @@ async function probarLoaderSavenow(videoUrl, formato) {
 
       const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
 
-      // Máximo 4 intentos con pausas cortas sin exceder ventana global
-      for (let i = 0; i < 4; i++) {
-        await new Promise((r) => setTimeout(r, 900));
+      // Hasta 12 intentos de polling (unos 13 segundos de conversión)
+      for (let i = 0; i < 12; i++) {
+        await new Promise((r) => setTimeout(r, 1100));
         try {
           const pRes = await axios.get(progressUrl, {
             headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-            signal: getTimeoutSignal(10000),
-            timeout: 10000,
+            signal: getTimeoutSignal(60000),
+            timeout: 60000,
             validateStatus: (status) => status === 200
           });
 
@@ -130,7 +132,7 @@ async function probarLoaderSavenow(videoUrl, formato) {
         } catch (_) {}
       }
     } catch (e) {
-      console.warn(`[Loader/Savenow ${dominio} Falló/Timeout 10s]:`, e.name === 'CanceledError' || e.name === 'AbortError' ? 'Timeout 10s' : e.message);
+      console.warn(`[Loader/Savenow ${dominio} Falló]:`, e.name === 'CanceledError' || e.name === 'AbortError' ? 'Timeout' : e.message);
     }
   }
   return null;
@@ -160,14 +162,16 @@ async function probarInvidious(videoId) {
     'https://invidious.nerdvpn.de',
     'https://yewtu.be',
     'https://invidious.f5.si',
-    'https://inv.tux.pizza'
+    'https://inv.tux.pizza',
+    'https://iv.ggtyler.dev',
+    'https://invidious.private.coffee'
   ];
 
   for (const host of invidiousHosts) {
     try {
       const r = await axios.get(`${host}/api/v1/videos/${videoId}`, {
-        signal: getTimeoutSignal(10000),
-        timeout: 10000,
+        signal: getTimeoutSignal(5000),
+        timeout: 5000,
         headers: { 'User-Agent': UA },
         validateStatus: (status) => status === 200
       });
@@ -183,13 +187,13 @@ async function probarInvidious(videoId) {
         };
       }
     } catch (e) {
-      // Aborta y salta inmediatamente al siguiente host si no responde en 10s
+      // Aborta y salta inmediatamente al siguiente host si no responde en 5s
     }
   }
   return null;
 }
 
-// 2.2 SoundCloud Progressive con AbortSignal.timeout(10000)
+// 2.2 SoundCloud Progressive con AbortSignal.timeout(60000)
 let scClientId = null;
 let scClientIdFecha = 0;
 
@@ -198,8 +202,8 @@ async function obtenerClientIdSoundCloud(forzar = false) {
 
   const html = (await axios.get('https://soundcloud.com/', {
     headers: { 'User-Agent': UA },
-    signal: getTimeoutSignal(10000),
-    timeout: 10000
+    signal: getTimeoutSignal(60000),
+    timeout: 60000
   })).data;
 
   const scripts = [...html.matchAll(/<script crossorigin src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)]
@@ -210,8 +214,8 @@ async function obtenerClientIdSoundCloud(forzar = false) {
     try {
       const js = (await axios.get(src, {
         headers: { 'User-Agent': UA },
-        signal: getTimeoutSignal(10000),
-        timeout: 10000
+        signal: getTimeoutSignal(60000),
+        timeout: 60000
       })).data;
       const m = js.match(/client_id\s*:\s*"([a-zA-Z0-9]{32})"/) || js.match(/client_id=([a-zA-Z0-9]{32})/);
       if (m) {
@@ -230,8 +234,8 @@ async function probarSoundCloud(busqueda, duracionRef) {
     const r = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
       params: { q: busqueda, client_id: clientId, limit: 10 },
       headers: { 'User-Agent': UA },
-      signal: getTimeoutSignal(10000),
-      timeout: 10000,
+      signal: getTimeoutSignal(60000),
+      timeout: 60000,
       validateStatus: (status) => status === 200
     });
 
@@ -256,8 +260,8 @@ async function probarSoundCloud(busqueda, duracionRef) {
     const streamInfo = await axios.get(progresivo.url, {
       params: { client_id: clientId },
       headers: { 'User-Agent': UA },
-      signal: getTimeoutSignal(10000),
-      timeout: 10000,
+      signal: getTimeoutSignal(60000),
+      timeout: 60000,
       validateStatus: (status) => status === 200
     });
 
@@ -293,14 +297,14 @@ async function resolverNivel3(videoUrl) {
   try {
     console.log(`[Nivel 3 Salvavidas]: Intentando extracción nativa con @distube/ytdl-core...`);
     
-    // Timeout estricto de 10s para ytdl.getInfo
+    // Timeout ampliado de 20s para ytdl.getInfo
     const info = await Promise.race([
       ytdlInstance.getInfo(videoUrl, {
         requestOptions: {
           headers: { 'User-Agent': UA }
         }
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('ytdl getInfo Timeout 10s')), 10000))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('ytdl getInfo Timeout 20s')), 20000))
     ]);
 
     if (!info || !Array.isArray(info.formats) || info.formats.length === 0) {
@@ -335,7 +339,7 @@ async function resolverNivel3(videoUrl) {
 
 // ---------------------------------------------------------------------------
 // FUNCIÓN MAESTRA EN CASCADA CON DEGRADACIÓN ELEGANTE (DOWNGRADE TRANSPARENTE)
-// Timeouts inflexibles de 10s por nivel/proveedor
+// Timeouts robustos mínimos de 60s en conjunto
 // ---------------------------------------------------------------------------
 async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') {
   const formato = normalizarFormato(formatoDeseado);
@@ -346,13 +350,13 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') 
   console.log(`\n----------------------------------------------------------------------`);
   console.log(`[Cascada de Resiliencia]: Iniciando resolución para "${video.title || busqueda}" (ID: ${video.videoId}, Formato: ${formato})`);
 
-  // 1. NIVEL 1: Convertidores de alta calidad (320k: Cobalt / Loader) con AbortSignal.timeout(10000)
+  // 1. NIVEL 1: Convertidores de alta calidad (320k: Cobalt / Loader) con timeout de hasta 25s
   if (videoUrl) {
     try {
-      console.log(`[Cascada Nivel 1]: Ejecutando extractores 320k (Cobalt / Loader) con timeout inflexible 10s...`);
+      console.log(`[Cascada Nivel 1]: Ejecutando extractores 320k (Cobalt / Loader)...`);
       const res1 = await Promise.race([
         resolverNivel1(videoUrl, formato),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1 Timeout 10s')), 10000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1 Timeout 25s')), 25000))
       ]);
 
       if (res1 && res1.url) {
@@ -364,12 +368,12 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') 
     }
   }
 
-  // 2. NIVEL 2: Degradación Elegante a flujo estándar (160k/128k: Invidious / SoundCloud) con AbortSignal.timeout(10000)
+  // 2. NIVEL 2: Degradación Elegante a flujo estándar (160k/128k: Invidious / SoundCloud) con timeout de hasta 25s
   try {
     console.log(`[Cascada Nivel 2 - Downgrade Transparente]: Conmutando a proveedores secundarios (Invidious / SoundCloud)...`);
     const res2 = await Promise.race([
       resolverNivel2(esYouTubeValido ? video.videoId : null, busqueda, duracionRef),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 2 Timeout 10s')), 10000))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 2 Timeout 25s')), 25000))
     ]);
 
     if (res2 && res2.url) {
@@ -380,13 +384,13 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') 
     console.warn(`[Cascada Nivel 2 Falló (${e2.message})]: Conmutando a Nivel 3 Salvavidas Nativo...`);
   }
 
-  // 3. NIVEL 3: Salvavidas definitivo (@distube/ytdl-core nativo) con AbortSignal.timeout(10000)
+  // 3. NIVEL 3: Salvavidas definitivo (@distube/ytdl-core nativo) con timeout de hasta 20s
   if (videoUrl) {
     try {
       console.log(`[Cascada Nivel 3 - Salvavidas Nativo]: Extrayendo stream nativo de YouTube...`);
       const res3 = await Promise.race([
         resolverNivel3(videoUrl),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 3 Timeout 10s')), 10000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 3 Timeout 20s')), 20000))
       ]);
 
       if (res3 && res3.url) {
@@ -397,6 +401,10 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') 
       console.warn(`[Cascada Nivel 3 Falló]: ${e3.message}`);
     }
   }
+
+  console.error(`[Cascada Agotada]: Todos los niveles de extracción fallaron para "${busqueda}".`);
+  return null;
+}
 
   console.error(`[Cascada Agotada]: Todos los niveles de extracción fallaron para "${busqueda}".`);
   return null;
