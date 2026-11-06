@@ -44,41 +44,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('/api/debug-extract', async (req, res) => {
-  const videoId = req.query.videoId || 'pRpeEdMmmQ0';
-  const resultados = {};
-  const { Ytdl, Client } = require('@distube/ytdl-core');
-
-  // Test ytdl with Tv client
-  try {
-    const ytdlTv = new Ytdl({ clients: [Client.Tv] });
-    const info = await ytdlTv.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
-    resultados.ytdl_tv = { ok: true, formats: info.formats?.length };
-  } catch (e) {
-    resultados.ytdl_tv = { ok: false, error: e.message };
-  }
-
-  // Test ytdl with Mweb client
-  try {
-    const ytdlMweb = new Ytdl({ clients: [Client.Mweb] });
-    const info = await ytdlMweb.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
-    resultados.ytdl_mweb = { ok: true, formats: info.formats?.length };
-  } catch (e) {
-    resultados.ytdl_mweb = { ok: false, error: e.message };
-  }
-
-  // Test ytdl with WebEmbedded client
-  try {
-    const ytdlEmb = new Ytdl({ clients: [Client.WebEmbedded] });
-    const info = await ytdlEmb.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
-    resultados.ytdl_emb = { ok: true, formats: info.formats?.length };
-  } catch (e) {
-    resultados.ytdl_emb = { ok: false, error: e.message };
-  }
-
-  res.json(resultados);
-});
-
 // ---------------------------------------------------------------------------
 // Extractores para resolver downloadUrl directa (MP3 / M4A)
 // ---------------------------------------------------------------------------
