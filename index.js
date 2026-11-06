@@ -44,6 +44,36 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/api/debug-extract', async (req, res) => {
+  const videoId = req.query.videoId || 'pRpeEdMmmQ0';
+  const resultados = {};
+  
+  // 1. Test Savenow
+  try {
+    const sRes = await axios.get(`https://p.savenow.to/api/v2/download?button=1&format=mp3&url=https://www.youtube.com/watch?v=${videoId}`, {
+      headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
+      timeout: 6000
+    });
+    resultados.savenow = { ok: true, data: sRes.data };
+  } catch (e) {
+    resultados.savenow = { ok: false, error: e.message, status: e.response?.status };
+  }
+
+  // 2. Test ytdl-core
+  try {
+    const { Ytdl } = require('@distube/ytdl-core');
+    const ytdl = new Ytdl();
+    const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
+      requestOptions: { headers: { 'User-Agent': UA } }
+    });
+    resultados.ytdl = { ok: true, formatsCount: info.formats?.length };
+  } catch (e) {
+    resultados.ytdl = { ok: false, error: e.message };
+  }
+
+  res.json(resultados);
+});
+
 // ---------------------------------------------------------------------------
 // Extractores para resolver downloadUrl directa (MP3 / M4A)
 // ---------------------------------------------------------------------------
