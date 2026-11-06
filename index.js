@@ -534,13 +534,18 @@ app.get('/api/obtener-enlace', async (req, res) => {
       });
     }
 
-    console.log(`[Éxito Cascada]: Enlace entregado al cliente (${resultadoAudio.calidad} / ${resultadoAudio.proveedor}): ${resultadoAudio.url.substring(0, 80)}...`);
+    let downloadUrlFinal = resultadoAudio.url;
+    if (resultadoAudio.proveedor === 'ytdl-native-stream' && downloadUrlFinal.includes('googlevideo.com')) {
+      downloadUrlFinal = `/api/proxy-stream?url=${encodeURIComponent(downloadUrlFinal)}`;
+    }
+
+    console.log(`[Éxito Cascada]: Enlace entregado al cliente (${resultadoAudio.calidad} / ${resultadoAudio.proveedor}): ${downloadUrlFinal.substring(0, 80)}...`);
 
     return finalizar(200, {
       titulo: trackTitle,
       artista: trackArtist,
       duracion: trackDuration,
-      downloadUrl: resultadoAudio.url,
+      downloadUrl: downloadUrlFinal,
       calidad: resultadoAudio.calidad,
       proveedor: resultadoAudio.proveedor
     });
