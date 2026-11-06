@@ -47,28 +47,33 @@ app.get('/health', (req, res) => {
 app.get('/api/debug-extract', async (req, res) => {
   const videoId = req.query.videoId || 'pRpeEdMmmQ0';
   const resultados = {};
-  
-  // 1. Test Savenow
+  const { Ytdl, Client } = require('@distube/ytdl-core');
+
+  // Test ytdl with Tv client
   try {
-    const sRes = await axios.get(`https://p.savenow.to/api/v2/download?button=1&format=mp3&url=https://www.youtube.com/watch?v=${videoId}`, {
-      headers: { 'User-Agent': UA, 'Referer': 'https://loader.to/' },
-      timeout: 6000
-    });
-    resultados.savenow = { ok: true, data: sRes.data };
+    const ytdlTv = new Ytdl({ clients: [Client.Tv] });
+    const info = await ytdlTv.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
+    resultados.ytdl_tv = { ok: true, formats: info.formats?.length };
   } catch (e) {
-    resultados.savenow = { ok: false, error: e.message, status: e.response?.status };
+    resultados.ytdl_tv = { ok: false, error: e.message };
   }
 
-  // 2. Test ytdl-core
+  // Test ytdl with Mweb client
   try {
-    const { Ytdl } = require('@distube/ytdl-core');
-    const ytdl = new Ytdl();
-    const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
-      requestOptions: { headers: { 'User-Agent': UA } }
-    });
-    resultados.ytdl = { ok: true, formatsCount: info.formats?.length };
+    const ytdlMweb = new Ytdl({ clients: [Client.Mweb] });
+    const info = await ytdlMweb.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
+    resultados.ytdl_mweb = { ok: true, formats: info.formats?.length };
   } catch (e) {
-    resultados.ytdl = { ok: false, error: e.message };
+    resultados.ytdl_mweb = { ok: false, error: e.message };
+  }
+
+  // Test ytdl with WebEmbedded client
+  try {
+    const ytdlEmb = new Ytdl({ clients: [Client.WebEmbedded] });
+    const info = await ytdlEmb.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
+    resultados.ytdl_emb = { ok: true, formats: info.formats?.length };
+  } catch (e) {
+    resultados.ytdl_emb = { ok: false, error: e.message };
   }
 
   res.json(resultados);
