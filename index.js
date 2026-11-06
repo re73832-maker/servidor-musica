@@ -561,7 +561,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // ENDPOINT: /api/proxy-stream
-// Proxy de streaming con CORS abierto para el navegador
+// Proxy de streaming con CORS abierto para el navegador y resolución de pista completa
 // ---------------------------------------------------------------------------
 app.get('/api/proxy-stream', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -570,14 +570,45 @@ app.get('/api/proxy-stream', async (req, res) => {
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Type');
 
   let audioUrl = (req.query.url || '').trim();
+  const videoId = (req.query.videoId || '').trim();
+  const busqueda = (req.query.q || '').trim();
+
+  // Si no se proporciona URL directa pero sí videoId o q, resolver la pista completa
+  if (!audioUrl && (videoId || busqueda)) {
+    try {
+      let video = null;
+      if (videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
+        video = { videoId, title: busqueda, seconds: parseInt(req.query.seconds) || 0 };
+      } else if (busqueda) {
+        video = await buscarVideoEnYouTube(busqueda);
+      }
+
+      if (video) {
+        const formato = (req.query.formato || 'mp3').toLowerCase();
+        const resCascada = await resolverAudioConCascada(video, busqueda || video.title, formato);
+        if (resCascada && resCascada.url) {
+          audioUrl = resCascada.url;
+          console.log(`[/api/proxy-stream]: Audio completo resuelto vía ${resCascada.proveedor}`);
+        }
+      }
+    } catch (errRes) {
+      console.warn('[/api/proxy-stream Error al resolver pista completa]:', errRes.message);
+    }
+  }
+
+  // Rechazar terminantemente fragmentos o URLs de preview de 30 segundos
+  if (audioUrl && (audioUrl.includes('audio-preview') || audioUrl.includes('m4a-preview') || audioUrl.includes('itunes.apple.com'))) {
+    return res.status(403).json({ error: 'Las pistas de vista previa de 30 segundos están deshabilitadas' });
+  }
+
   if (!audioUrl) {
-    return res.status(400).json({ error: 'Debes enviar el parámetro ?url=' });
+    return res.status(400).json({ error: 'Debes enviar el parámetro ?url= o ?videoId= o ?q=' });
   }
 
   // Forzar siempre https para evitar bloqueos por Mixed Active Content
   audioUrl = audioUrl.replace(/^http:\/\//i, 'https://');
 
-  console.log(`\n[/api/proxy-stream]: Transmitiendo stream para: ${audioUrl.substring(0, 80)}...`);
+  console.log(`\n[/api/proxy-stream]: Transmitiendo stream completo para: ${audioUrl.substring(0, 80)}...`);
 
   let axiosStream = null;
 
