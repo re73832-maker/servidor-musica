@@ -14,27 +14,31 @@
     <link rel="apple-touch-icon" href="/pwa-192x192.png" />
     <link rel="manifest" href="/manifest.json" />
     <title>Música</title>
-    <script type="module" crossorigin src="/assets/index-FQSoH2Xb.js"></script>
+    <script type="module" crossorigin src="/assets/index-DSzsGkIj.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-ClgzP6AO.css">
   <link rel="manifest" href="/manifest.webmanifest"></head>
   <body>
     <div id="root"></div>
     <script>
-      // Solo registrar Service Worker en navegador web estándar, NUNCA en Capacitor nativo
-      if ('serviceWorker' in navigator && !(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform())) {
+      // Registrar Service Worker para caché offline total y actualización OTA tanto en web como en Capacitor
+      if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
             .then((registration) => {
-              registration.update().catch(() => {});
-              setInterval(() => {
+              if (navigator.onLine) {
                 registration.update().catch(() => {});
+              }
+              setInterval(() => {
+                if (navigator.onLine) {
+                  registration.update().catch(() => {});
+                }
               }, 60000);
             })
             .catch(() => {});
         });
 
         document.addEventListener('visibilitychange', () => {
-          if (document.visibilityState === 'visible') {
+          if (document.visibilityState === 'visible' && navigator.onLine) {
             navigator.serviceWorker.getRegistration().then((reg) => {
               if (reg) reg.update().catch(() => {});
             });
