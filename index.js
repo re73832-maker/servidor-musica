@@ -968,10 +968,13 @@ app.use((req, res, next) => {
 app.use(express.static(RUTA_ESTATICOS, {
   setHeaders: (res, pathRes) => {
     const nombre = path.basename(pathRes).toLowerCase();
+    const rutaNormalizada = pathRes.replace(/\\/g, '/').toLowerCase();
     if (nombre === 'sw.js' || nombre === 'index.html' || nombre.endsWith('.webmanifest') || nombre.endsWith('.json')) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
+    } else if (rutaNormalizada.includes('/assets/') || nombre.endsWith('.js') || nombre.endsWith('.css')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
   }
 }));
