@@ -14,30 +14,44 @@
     <link rel="apple-touch-icon" href="/pwa-192x192.png" />
     <link rel="manifest" href="/manifest.json" />
     <title>Música</title>
-    <script type="module" crossorigin src="/assets/index-Cyrv5q8m.js"></script>
+    <script>
+      // Destruir Service Worker zombi si venimos de recarga forzada o si estamos en Capacitor nativo
+      (function() {
+        var params = new URLSearchParams(window.location.search);
+        var isCapacitor = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+        if (params.has('t') || params.has('_v_reload') || isCapacitor) {
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(regs) {
+              regs.forEach(function(r) { r.unregister(); });
+            });
+          }
+          if ('caches' in window) {
+            caches.keys().then(function(names) {
+              names.forEach(function(n) { caches.delete(n); });
+            });
+          }
+        }
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-C5nnChzJ.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-B1EguLlP.css">
   <link rel="manifest" href="/manifest.webmanifest"></head>
   <body>
     <div id="root"></div>
     <script>
-      if ('serviceWorker' in navigator) {
+      // Solo registrar Service Worker en navegador web estándar, NUNCA en Capacitor nativo
+      if ('serviceWorker' in navigator && !(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform())) {
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
             .then((registration) => {
-              // Chequear actualización inmediatamente al abrir
               registration.update().catch(() => {});
-              
-              // Chequear periódicamente cada 60 segundos
               setInterval(() => {
                 registration.update().catch(() => {});
               }, 60000);
             })
-            .catch((err) => {
-              console.warn('Registro de ServiceWorker:', err);
-            });
+            .catch(() => {});
         });
 
-        // Al volver a la app en el teléfono, verificar inmediatamente si hay versión nueva
         document.addEventListener('visibilitychange', () => {
           if (document.visibilityState === 'visible') {
             navigator.serviceWorker.getRegistration().then((reg) => {
