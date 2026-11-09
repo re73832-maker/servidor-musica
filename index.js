@@ -432,7 +432,8 @@ app.get('/api/buscar-canciones', async (req, res) => {
     artist: v.author ? (v.author.name || v.author) : '',
     timestamp: v.timestamp || `${Math.floor((v.seconds || 0) / 60)}:${(v.seconds || 0) % 60 < 10 ? '0' : ''}${(v.seconds || 0) % 60}`,
     seconds: v.seconds || 0,
-    thumbnail: v.thumbnail || v.image || ''
+    thumbnail: v.thumbnail || v.image || '',
+    previewUrl: v.previewUrl || ''
   }));
 
   // Guardar en cache para respuestas inmediatas posteriores
@@ -596,9 +597,10 @@ app.get('/api/proxy-stream', async (req, res) => {
     }
   }
 
-  // Rechazar terminantemente fragmentos o URLs de preview de 30 segundos
-  if (audioUrl && (audioUrl.includes('audio-preview') || audioUrl.includes('m4a-preview') || audioUrl.includes('itunes.apple.com'))) {
-    return res.status(403).json({ error: 'Las pistas de vista previa de 30 segundos están deshabilitadas' });
+  // Rechazar fragmentos o URLs de preview de 30 segundos solo si NO es una solicitud explícita de vista previa
+  const esPeticionPreview = req.query.tipo === 'preview' || req.query.preview === 'true';
+  if (!esPeticionPreview && audioUrl && (audioUrl.includes('audio-preview') || audioUrl.includes('m4a-preview') || audioUrl.includes('itunes.apple.com'))) {
+    return res.status(403).json({ error: 'Las pistas de vista previa de 30 segundos están deshabilitadas para descarga final' });
   }
 
   if (!audioUrl) {
