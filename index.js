@@ -4,6 +4,7 @@ const yts = require('yt-search');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
+const zlib = require('zlib');
 
 const app = express();
 const PUERTO = process.env.PORT || 4000;
@@ -33,6 +34,47 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+// Compresión HTTP ligera (Brotli / Gzip) con zlib nativo para respuestas JSON, JS, CSS, HTML y SVG
+app.use((req, res, next) => {
+  const acceptEncoding = (req.headers['accept-encoding'] || '').toLowerCase();
+  const supportsBr = acceptEncoding.includes('br');
+  const supportsGzip = acceptEncoding.includes('gzip');
+  if ((!supportsBr && !supportsGzip) || req.path.startsWith('/api/proxy-stream')) {
+    return next();
+  }
+
+  const origSend = res.send.bind(res);
+  res.send = (body) => {
+    try {
+      if (res.headersSent || !body) return origSend(body);
+      const ct = String(res.getHeader('Content-Type') || '').toLowerCase();
+      const esComprimible =
+        typeof body === 'string' ||
+        ct.includes('json') ||
+        ct.includes('javascript') ||
+        ct.includes('css') ||
+        ct.includes('html') ||
+        ct.includes('svg');
+      const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
+      if (!esComprimible || buf.length < 1024) {
+        return origSend(body);
+      }
+      res.setHeader('Vary', 'Accept-Encoding');
+      if (supportsBr) {
+        res.setHeader('Content-Encoding', 'br');
+        res.removeHeader('Content-Length');
+        return origSend(zlib.brotliCompressSync(buf));
+      }
+      res.setHeader('Content-Encoding', 'gzip');
+      res.removeHeader('Content-Length');
+      return origSend(zlib.gzipSync(buf));
+    } catch (_) {
+      return origSend(body);
+    }
+  };
+  next();
+});
 
 // Endpoint de chequeo de salud para Render
 app.get('/health', (req, res) => {
