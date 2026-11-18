@@ -985,7 +985,18 @@ app.get('/descargar', async (req, res) => {
   }
 });
 
-// Rutas de compatibilidad
+// Rutas de compatibilidad y streaming directo (/api/stream y /stream)
+app.get('/api/stream', (req, res) => {
+  const videoId = req.query.id || req.query.videoId || '';
+  const titulo = req.query.titulo || req.query.q || '';
+  const artist = req.query.artist || '';
+  const seconds = req.query.seconds || 0;
+  const qFinal = `${titulo} ${artist}`.trim();
+  return res.redirect(
+    307,
+    `/api/proxy-stream?videoId=${encodeURIComponent(videoId)}&q=${encodeURIComponent(qFinal)}&seconds=${encodeURIComponent(seconds)}&tipo=preview`
+  );
+});
 app.get('/buscar', (req, res) => res.redirect(307, `/api/obtener-enlace?q=${encodeURIComponent(req.query.q || '')}`));
 app.get('/stream', (req, res) => res.redirect(307, `/descargar?q=${encodeURIComponent(req.query.q || '')}`));
 
