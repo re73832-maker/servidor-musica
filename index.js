@@ -309,7 +309,11 @@ async function resolverSoundCloud(busqueda, duracionRef) {
   return null;
 }
 
-const { resolverAudioConCascada, normalizarFormato: normalizarFormatoCascada } = require('./utils/cascadeResolver');
+const {
+  resolverAudioConCascada,
+  ensamblarHlsSoundCloudABuffer,
+  normalizarFormato: normalizarFormatoCascada
+} = require('./utils/cascadeResolver');
 
 // Función maestra para resolver el enlace de descarga directa con soporte de formatos (Cascada de 3 niveles)
 async function resolverDirectAudioUrl(video, busqueda, formatoDeseado = 'mp3') {
@@ -578,7 +582,10 @@ app.get('/api/obtener-enlace', async (req, res) => {
     }
 
     let downloadUrlFinal = resultadoAudio.url;
-    if (resultadoAudio.proveedor === 'ytdl-native-stream' && downloadUrlFinal.includes('googlevideo.com')) {
+    if (
+      resultadoAudio.esHlsSoundCloud ||
+      (resultadoAudio.proveedor === 'ytdl-native-stream' && downloadUrlFinal.includes('googlevideo.com'))
+    ) {
       downloadUrlFinal = `/api/proxy-stream?url=${encodeURIComponent(downloadUrlFinal)}`;
     }
 
@@ -701,11 +708,29 @@ app.get('/api/proxy-stream', async (req, res) => {
     }
 
     const contentTypeRemoto = (response.headers['content-type'] || '').toLowerCase();
+    // Si la URL resuelta es una playlist HLS M3U8 de SoundCloud, ensamblar sus segmentos fMP4/MP3 en memoria y entregar el archivo de audio continuo
+    if (
+      contentTypeRemoto.includes('mpegurl') ||
+      audioUrl.includes('playback.media-streaming.soundcloud.cloud') ||
+      audioUrl.includes('.m3u8')
+    ) {
+      try {
+        console.log(`[/api/proxy-stream]: Ensamblando playlist HLS SoundCloud en archivo de audio continuo...`);
+        const ensamblado = await ensamblarHlsSoundCloudABuffer(audioUrl);
+        res.setHeader('Content-Type', ensamblado.mime);
+        res.setHeader('Content-Length', ensamblado.buffer.length);
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'no-cache');
+        return res.status(200).send(ensamblado.buffer);
+      } catch (errHls) {
+        console.warn(`[/api/proxy-stream HLS Muxer Falló]:`, errHls.message);
+        return res.status(502).json({ error: 'No se pudo ensamblar el stream HLS' });
+      }
+    }
+
     if (
       contentTypeRemoto.includes('text/html') ||
       contentTypeRemoto.includes('text/plain') ||
-      contentTypeRemoto.includes('application/vnd.apple.mpegurl') ||
-      contentTypeRemoto.includes('application/x-mpegurl') ||
       contentTypeRemoto.includes('application/json')
     ) {
       console.warn(`[/api/proxy-stream]: Servidor remoto no devolvió audio sino ${contentTypeRemoto}`);
@@ -840,6 +865,30 @@ app.get('/api/descargar-cancion', async (req, res) => {
 
     let downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');
     console.log(`[Descarga Directa (${resultadoAudio.calidad} / ${resultadoAudio.proveedor})]: Conectando stream...`);
+
+    // Si es un stream HLS de SoundCloud, ensamblar los segmentos directamente en un archivo completo y enviarlo
+    if (
+      resultadoAudio.esHlsSoundCloud ||
+      downloadUrl.includes('playback.media-streaming.soundcloud.cloud') ||
+      downloadUrl.includes('.m3u8')
+    ) {
+      try {
+        const ensamblado = await ensamblarHlsSoundCloudABuffer(downloadUrl);
+        clearTimeout(timeoutGuard);
+        respondido = true;
+        const safeTitle = trackTitle.replace(/[/\\?%*:|"<>]/g, '_');
+        res.setHeader('Content-Type', ensamblado.mime);
+        res.setHeader('Content-Length', ensamblado.buffer.length);
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('X-Titulo-Audio', encodeURIComponent(trackTitle));
+        res.setHeader('X-Calidad-Audio', resultadoAudio.calidad);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.mp3"`);
+        return res.status(200).send(ensamblado.buffer);
+      } catch (errHlsDesc) {
+        console.warn(`[/api/descargar-cancion HLS Muxer Falló]:`, errHlsDesc.message);
+      }
+    }
 
     // 2. Conectar y transmitir el stream con timeout de 60 segundos
     async function intentarConectarStream(urlRemota) {
