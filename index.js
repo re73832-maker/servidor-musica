@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.0.1 OTA 🚀',
-    cacheVersion: 'app-musica-v4.0.1',
+    version: 'v4.1.0 Oficial 🚀',
+    cacheVersion: 'app-musica-v4.1.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -106,12 +106,15 @@ function extraerPlaylistIdSpotify(inputUrl = '') {
 
 function decodificarHtmlEntities(str = '') {
   return String(str || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&#x27;/gi, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -794,7 +797,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
     }
 
     if (!video) {
-      return finalizar(404, { error: true, mensaje: 'No se encontró la canción en YouTube' });
+      return finalizar(404, { error: true, mensaje: 'No se encontró el audio oficial de estudio del artista' });
     }
 
     const trackTitle = video.title || busqueda;
@@ -803,14 +806,14 @@ app.get('/api/obtener-enlace', async (req, res) => {
 
     console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s, ID: ${video.videoId})`);
 
-    // 2. Resolver enlace con la cascada de 3 niveles y downgrade transparente
+    // 2. Resolver enlace con la cascada oficial de estudio (Prohibido covers de relleno)
     const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
 
     if (!resultadoAudio || !resultadoAudio.url) {
-      console.warn(`[Aviso Cascada]: No se pudo resolver audio para "${busqueda}".`);
-      return finalizar(500, {
+      console.warn(`[Aviso Cascada Oficial]: No se encontró el audio oficial de estudio del artista para "${busqueda}".`);
+      return finalizar(404, {
         error: true,
-        mensaje: 'Audio no disponible temporalmente'
+        mensaje: 'No se encontró el audio oficial de estudio del artista'
       });
     }
 
@@ -1092,16 +1095,16 @@ app.get('/api/descargar-cancion', async (req, res) => {
     }
 
     if (!video) {
-      return responderError(404, 'No se encontró la canción en YouTube');
+      return responderError(404, 'No se encontró el audio oficial de estudio del artista');
     }
 
     const trackTitle = video.title || busqueda;
 
-    // 1. Resolver enlace mediante la cascada de 3 niveles con downgrade transparente
+    // 1. Resolver enlace mediante la cascada oficial de estudio (Prohibido covers de relleno)
     let resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
 
     if (!resultadoAudio || !resultadoAudio.url) {
-      return responderError(500, 'Audio no disponible temporalmente');
+      return responderError(404, 'No se encontró el audio oficial de estudio del artista');
     }
 
     let downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');

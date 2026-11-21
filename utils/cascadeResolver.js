@@ -27,10 +27,39 @@ function normalizarFormato(formato) {
 }
 
 // ---------------------------------------------------------------------------
-// FILTRO ESTRICTO ANTI-COVERS Y PRIORIDAD DE VOZ ORIGINAL DEL ARTISTA
+// FILTRO DISCOGRÁFICO ESTRICTO ANTI-COVERS Y PRIORIDAD DE AUDIO ORIGINAL DE ESTUDIO
 // ---------------------------------------------------------------------------
-const REGEX_PERMITIDOS_EN_ORIGINAL = /\b(cover|karaoke|instrumental|remix|version|tributo|en\s*vivo|live|acustico|acústico)\b/i;
-const REGEX_LISTA_NEGRA_COVERS = /\b(cover|karaoke|instrumental|tribute|tributo|8d|slowed|sped\s*up|nightcore|parodia|acustico|acústico|tutorial|type\s*beat|reverb|bass\s*boosted|chipmunk|ai\s*cover|imitacion|imitación)\b/i;
+const PALABRAS_LISTA_NEGRA_ESTRICTA = [
+  'cover',
+  'karaoke',
+  'instrumental',
+  'tribute',
+  'tributo',
+  'nightcore',
+  'sped up',
+  'slowed',
+  '8d',
+  'parodia',
+  'acústico',
+  'acustico',
+  'acoustic',
+  'session',
+  'live',
+  'en vivo',
+  'fan',
+  'version',
+  'versión',
+  'letra',
+  'lyrics',
+  'remix',
+  'bootleg',
+  'mashup',
+  'reverb',
+  'tutorial',
+  'ai cover',
+  'imitacion',
+  'imitación'
+];
 
 function normalizarTextoSimple(txt = '') {
   return String(txt || '')
@@ -43,7 +72,7 @@ function normalizarTextoSimple(txt = '') {
 }
 
 /**
- * Limpia paréntesis, corchetes y featuring secundarios de un título para consulta de rescate
+ * Limpia paréntesis, corchetes y featuring secundarios de un título
  * Ej: "Canción (feat. Otro) [Remastered]" -> "Canción"
  */
 function limpiarTituloParaRescate(titulo = '') {
@@ -57,14 +86,21 @@ function limpiarTituloParaRescate(titulo = '') {
 }
 
 /**
- * Construye la consulta principal exacta estilo Spotify: "${artista} - ${titulo} Official Audio"
- * y la consulta alternativa de rescate: "${artista} ${tituloLimpio} audio"
+ * Separa título y artista limpios y construye las 3 consultas discográficas obligatorias en orden:
+ * 1) "Provided to YouTube by" "${titulo}" "${artista}"
+ * 2) "${titulo}" "${artista} - Topic"
+ * 3) "${artista}" "${titulo}" "Official Audio"
  */
 function construirConsultasOriginalYRescate(tituloRaw = '', artistaRaw = '') {
-  let titulo = String(tituloRaw || '').trim();
-  let artista = String(artistaRaw || '').trim();
+  let titulo = String(tituloRaw || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  let artista = String(artistaRaw || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  // Si el título ya venía como "Artista - Canción" o "Canción - Artista" y no había artista explícito
   if (!artista && titulo.includes(' - ')) {
     const partes = titulo.split(' - ').map((p) => p.trim()).filter(Boolean);
     if (partes.length >= 2) {
@@ -78,103 +114,179 @@ function construirConsultasOriginalYRescate(tituloRaw = '', artistaRaw = '') {
   }
 
   const tituloLimpio = limpiarTituloParaRescate(titulo) || titulo;
-  const artistaPrincipal = artista.split(/,|&|\bfeat\.?\b|\bft\.?\b/i)[0].trim() || artista;
+  const artistaPrincipal =
+    artista
+      .split(/,|;|\/|&|\bfeat\.?\b|\bft\.?\b|\bx\b/i)[0]
+      .replace(/\u00a0/g, ' ')
+      .trim() || artista;
 
-  const consultaOriginal = artista
-    ? `${artista} - ${titulo} Official Audio`
-    : `${titulo} Official Audio`;
+  const consultasDiscograficas = artistaPrincipal
+    ? [
+        `"Provided to YouTube by" "${tituloLimpio}" "${artistaPrincipal}"`,
+        `"${tituloLimpio}" "${artistaPrincipal} - Topic"`,
+        `"${artistaPrincipal}" "${tituloLimpio}" "Official Audio"`
+      ]
+    : [
+        `"Provided to YouTube by" "${tituloLimpio}"`,
+        `"${tituloLimpio}" "Official Audio"`
+      ];
 
-  const consultaRescate = artistaPrincipal
-    ? `${artistaPrincipal} ${tituloLimpio} audio`
-    : `${tituloLimpio} audio`;
+  const consultaOriginal = consultasDiscograficas[1] || consultasDiscograficas[0];
+  const consultaRescate = consultasDiscograficas[2] || `${artistaPrincipal} ${tituloLimpio} Official Audio`.trim();
 
   return {
     titulo,
     tituloLimpio,
     artista,
     artistaPrincipal,
+    consultasDiscograficas,
     consultaOriginal,
     consultaRescate
   };
 }
 
 /**
- * Evalúa si un candidato (de YouTube o SoundCloud) viola la lista negra anti-covers
- * cuando el título original de Spotify NO pide un cover/karaoke/remix/en vivo.
+ * Filtro de Autor/Canal Obligatorio:
+ * DESCARTA DE INMEDIATO cualquier video cuyo canal (author.name) NO cumpla al menos una de estas condiciones:
+ * 1) Termina en " - Topic" (canal autogenerado por la disquera).
+ * 2) Contiene "VEVO" o "Official" / "Oficial".
+ * 3) El nombre del canal contiene exactamente el nombre del artista principal (artista.toLowerCase()).
  */
-function esResultadoEnListaNegra(tituloCandidato = '', autorCandidato = '', tituloOriginalSpotify = '') {
-  const originalPideEspecial = REGEX_PERMITIDOS_EN_ORIGINAL.test(tituloOriginalSpotify || '');
-  if (originalPideEspecial) return false;
+function esCanalAutorOficialValido(autorRaw = '', artistaOriginal = '') {
+  const autor = String(autorRaw || '').replace(/\u00a0/g, ' ').trim();
+  if (!autor) return false;
 
-  const textoEvaluar = `${tituloCandidato || ''} ${autorCandidato || ''}`;
-  const textoNorm = normalizarTextoSimple(textoEvaluar);
-  if (REGEX_LISTA_NEGRA_COVERS.test(textoEvaluar) || REGEX_LISTA_NEGRA_COVERS.test(textoNorm)) {
+  const autorLower = autor.toLowerCase();
+  const autorNorm = normalizarTextoSimple(autor);
+
+  // Condición 1: Termina en " - Topic" (o canal Topic autogenerado por YouTube Music / disquera)
+  if (/-\s*topic$/i.test(autor) || /\btopic$/i.test(autor)) {
     return true;
   }
-  // Si el original no pide remix ni live, penalizar remixes/live no solicitados
-  if (!/\b(remix|mix)\b/i.test(tituloOriginalSpotify) && /\b(remix|bootleg|mashup|dj\s*mix)\b/i.test(textoEvaluar)) {
+
+  // Condición 2: Contiene "VEVO" o "Official" / "Oficial"
+  if (/\b(vevo|official|oficial)\b/i.test(autorLower)) {
     return true;
+  }
+
+  // Condición 3: El nombre del canal contiene exactamente el nombre del artista principal
+  const listaArtistas = String(artistaOriginal || '')
+    .replace(/\u00a0/g, ' ')
+    .split(/,|;|\/|&|\bfeat\.?\b|\bft\.?\b/i)
+    .map((a) => a.trim())
+    .filter((a) => a.length >= 2);
+
+  for (const art of listaArtistas) {
+    const artLower = art.toLowerCase();
+    const artNorm = normalizarTextoSimple(art);
+    if (artLower && autorLower.includes(artLower)) {
+      return true;
+    }
+    if (artNorm && artNorm.length >= 3 && autorNorm.includes(artNorm)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Lista Negra Estricta:
+ * Rechaza cualquier resultado cuyo título o canal contenga:
+ * cover, karaoke, instrumental, tribute, tributo, nightcore, sped up, slowed, 8d,
+ * parodia, acústico, acoustic, session, live, en vivo, fan, version, letra, lyrics
+ * (a menos que el título original de Spotify contenga explícitamente esa palabra).
+ */
+function esResultadoEnListaNegra(tituloCandidato = '', autorCandidato = '', tituloOriginalSpotify = '') {
+  const origNorm = ` ${normalizarTextoSimple(tituloOriginalSpotify)} `;
+  const candTexto = `${tituloCandidato || ''} ${autorCandidato || ''}`;
+  const candNorm = ` ${normalizarTextoSimple(candTexto)} `;
+
+  for (const palabra of PALABRAS_LISTA_NEGRA_ESTRICTA) {
+    const palNorm = normalizarTextoSimple(palabra);
+    if (!palNorm) continue;
+    const regexPalabra = new RegExp(`\\b${palNorm.replace(/\s+/g, '\\s+')}\\b`, 'i');
+    if (regexPalabra.test(candNorm) || regexPalabra.test(candTexto)) {
+      // Verificar si el título original de Spotify contiene explícitamente esa palabra
+      if (!regexPalabra.test(origNorm) && !regexPalabra.test(tituloOriginalSpotify || '')) {
+        return true;
+      }
+    }
   }
   return false;
 }
 
 /**
- * Calcula un puntaje de prioridad para elegir SIEMPRE la voz original del artista:
- * - Menor puntaje = Mejor coincidencia.
- * - Verifica coincidencia del artista en título o canal/autor.
- * - Descarta/penaliza lista negra anti-covers.
- * - Verifica tolerancia estricta de ±18 segundos respecto a duracionSegundos de Spotify.
+ * Evalúa de forma estricta un candidato para asegurar que sea EXCLUSIVAMENTE
+ * la grabación oficial de estudio del artista original.
  */
 function evaluarCandidatoOriginal({
   tituloCandidato = '',
   autorCandidato = '',
+  descripcionCandidato = '',
   duracionSegsCandidato = 0,
   tituloOriginal = '',
   artistaOriginal = '',
   duracionRefSegs = 0,
-  toleranciaMaxSegs = 18
+  toleranciaMaxSegs = 10
 }) {
+  const canalValido = esCanalAutorOficialValido(autorCandidato, artistaOriginal);
   const enListaNegra = esResultadoEnListaNegra(tituloCandidato, autorCandidato, tituloOriginal);
+
+  // Validación de Duración Exacta: Si Spotify proporcionó duracionSegundos > 0,
+  // rechaza cualquier resultado cuya duración difiera en más de ±10 segundos.
+  const tieneDuracionSpotify = duracionRefSegs > 0;
   const diffSegs =
-    duracionRefSegs > 30 && duracionSegsCandidato > 0
+    tieneDuracionSpotify && duracionSegsCandidato > 0
       ? Math.abs(duracionSegsCandidato - duracionRefSegs)
       : 0;
   const dentroToleranciaDuracion =
-    !(duracionRefSegs > 30 && duracionSegsCandidato > 0) || diffSegs <= toleranciaMaxSegs;
+    !tieneDuracionSpotify ||
+    (duracionSegsCandidato > 0 && diffSegs <= toleranciaMaxSegs);
 
   const normTituloCand = normalizarTextoSimple(tituloCandidato);
   const normAutorCand = normalizarTextoSimple(autorCandidato);
-  const normArtistaOrig = normalizarTextoSimple(
-    (artistaOriginal || '').split(/,|&|\bfeat\.?\b|\bft\.?\b/i)[0]
-  );
   const normTituloOrig = normalizarTextoSimple(limpiarTituloParaRescate(tituloOriginal) || tituloOriginal);
-
-  const coincideArtista =
-    !normArtistaOrig ||
-    normTituloCand.includes(normArtistaOrig) ||
-    normAutorCand.includes(normArtistaOrig);
-
+  const palabrasTitulo = normTituloOrig.split(' ').filter((w) => w.length >= 2);
+  const palabrasCoincidentes = palabrasTitulo.filter((w) => normTituloCand.includes(w));
   const coincideTitulo =
     !normTituloOrig ||
     normTituloCand.includes(normTituloOrig) ||
-    normTituloOrig.split(' ').filter((w) => w.length > 2).every((w) => normTituloCand.includes(w));
+    (palabrasTitulo.length > 0 && palabrasCoincidentes.length >= Math.ceil(palabrasTitulo.length * 0.7));
 
-  const esCanalOficial =
-    /\b(topic|official|oficial|vevo)\b/i.test(autorCandidato || '') ||
-    /\b(official\s*audio|audio\s*oficial|provided\s*to\s*youtube)\b/i.test(tituloCandidato || '');
+  const esTopicDisquera =
+    /-\s*topic$/i.test(String(autorCandidato || '').trim()) ||
+    /provided to youtube by/i.test(descripcionCandidato || '');
+  const esVevoOficial = /\b(vevo|official|oficial)\b/i.test(autorCandidato || '');
+  const esOfficialAudioTitle = /\b(official\s*audio|audio\s*oficial)\b/i.test(tituloCandidato || '');
+
+  const esAutenticoEstudio =
+    canalValido &&
+    !enListaNegra &&
+    dentroToleranciaDuracion &&
+    coincideTitulo;
 
   let penalizacion = diffSegs * 1000;
-  if (enListaNegra) penalizacion += 500000;
-  if (!dentroToleranciaDuracion) penalizacion += 150000 + diffSegs * 2000;
-  if (!coincideArtista) penalizacion += 60000;
-  if (!coincideTitulo) penalizacion += 45000;
-  if (esCanalOficial) penalizacion -= 12000;
+  if (!canalValido) penalizacion += 1000000;
+  if (enListaNegra) penalizacion += 1000000;
+  if (!dentroToleranciaDuracion) penalizacion += 500000 + diffSegs * 5000;
+  if (!coincideTitulo) penalizacion += 200000;
+
+  // Premiar grabaciones directas de disquera (" - Topic" / "Provided to YouTube by") sobre videoclips con intro hablada
+  if (esTopicDisquera) penalizacion -= 25000;
+  if (esOfficialAudioTitle) penalizacion -= 15000;
+  if (esVevoOficial) penalizacion -= 8000;
+  if (normAutorCand && artistaOriginal && normAutorCand.includes(normalizarTextoSimple(artistaOriginal.split(',')[0]))) {
+    penalizacion -= 6000;
+  }
 
   return {
+    esAutenticoEstudio,
+    canalValido,
     enListaNegra,
     dentroToleranciaDuracion,
-    coincideArtista,
     coincideTitulo,
+    esTopicDisquera,
     diffSegs,
     penalizacion
   };
@@ -516,7 +628,181 @@ async function probarLoaderSavenow(videoUrl, formato) {
 }
 
 // ---------------------------------------------------------------------------
-// BUSCADOR DE VIDEO EN YOUTUBE CON FILTRO ESTRICTO ANTI-COVERS Y RESCATE
+// NIVEL 3: Invidious Adaptive Audio Directo (itag 140 M4A / 251 Opus de YouTube oficial)
+// ---------------------------------------------------------------------------
+async function resolverInvidiousDirecto(videoId) {
+  if (!videoId || videoId.length !== 11) return null;
+  const invidiousHosts = [
+    'https://inv.nadeko.net',
+    'https://invidious.nerdvpn.de',
+    'https://yewtu.be',
+    'https://invidious.jing.rocks',
+    'https://invidious.f5.si',
+    'https://inv.tux.pizza'
+  ];
+
+  for (const host of invidiousHosts) {
+    try {
+      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, {
+        signal: getTimeoutSignal(6000),
+        timeout: 6000,
+        headers: { 'User-Agent': UA }
+      });
+      const formatos = (r.data?.adaptiveFormats || []).filter((f) => f.type?.startsWith('audio/') && f.url);
+      const mejor =
+        formatos.find((f) => String(f.itag) === '140') ||
+        formatos.find((f) => String(f.itag) === '251') ||
+        formatos[0];
+      if (mejor && mejor.url) {
+        console.log(`[Invidious Oficial Éxito]: Resuelto audio original de YouTube (${videoId}) vía ${host}`);
+        return {
+          url: mejor.url,
+          calidad: '160k',
+          nivel: 3,
+          proveedor: 'Invidious-Official-Audio'
+        };
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// NIVEL 4: SoundCloud Directo SOLO con Verificación Discográfica Estricta
+// (PROHIBIDO búsqueda abierta sin verificar artista y duración exacta ±10s)
+// ---------------------------------------------------------------------------
+async function probarSoundCloudVerificadoDisquera(tituloOriginal = '', artistaOriginal = '', duracionRefSegs = 0) {
+  if (!artistaOriginal || !tituloOriginal) return null;
+  try {
+    let clientId = await obtenerClientIdSoundCloud();
+    if (!clientId) clientId = await obtenerClientIdSoundCloud(true);
+    if (!clientId) return null;
+
+    const { tituloLimpio, artistaPrincipal } = construirConsultasOriginalYRescate(tituloOriginal, artistaOriginal);
+    const qSc = `${artistaPrincipal} ${tituloLimpio}`.trim();
+
+    const r = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
+      params: { q: qSc, client_id: clientId, limit: 15 },
+      headers: { 'User-Agent': UA },
+      signal: getTimeoutSignal(7000),
+      timeout: 7000,
+      validateStatus: (status) => status === 200
+    });
+
+    const coleccion = (r.data?.collection || [])
+      .filter((p) => p.policy !== 'SNIP' && p.policy !== 'BLOCK')
+      .filter((p) => p.full_duration >= 45000 && p.full_duration <= 720000);
+
+    if (!coleccion.length) return null;
+
+    const artNorm = normalizarTextoSimple(artistaPrincipal);
+    const titNorm = normalizarTextoSimple(tituloLimpio);
+
+    // Filtrar EXCLUSIVAMENTE pistas cuya cuenta/metadato oficial coincida con el artista,
+    // sin ninguna palabra de la lista negra estricta y dentro de ±10 segundos exactos
+    const verificadas = coleccion.filter((p) => {
+      const durSegs = Math.round((p.full_duration || 0) / 1000);
+      if (duracionRefSegs > 0 && Math.abs(durSegs - duracionRefSegs) > 10) {
+        return false;
+      }
+
+      const username = p.user?.username || '';
+      const pubArtist = p.publisher_metadata?.artist || '';
+      const trackTitle = p.title || '';
+
+      if (esResultadoEnListaNegra(trackTitle, `${username} ${pubArtist}`, tituloOriginal)) {
+        return false;
+      }
+
+      const userNorm = normalizarTextoSimple(username);
+      const pubNorm = normalizarTextoSimple(pubArtist);
+      const titleNorm = normalizarTextoSimple(trackTitle);
+
+      // El artista oficial DEBE coincidir en publisher_metadata.artist, en la cuenta oficial del usuario, o en título + sello verificado
+      const artistaVerificado =
+        (pubNorm && pubNorm.includes(artNorm)) ||
+        (userNorm && userNorm.includes(artNorm)) ||
+        (p.user?.verified === true && titleNorm.includes(artNorm));
+
+      if (!artistaVerificado) return false;
+
+      // El título limpio debe coincidir
+      const palabrasTit = titNorm.split(' ').filter((w) => w.length >= 2);
+      const coincideTit =
+        titleNorm.includes(titNorm) ||
+        (palabrasTit.length > 0 && palabrasTit.every((w) => titleNorm.includes(w)));
+
+      return coincideTit;
+    });
+
+    if (!verificadas.length) return null;
+
+    // Ordenar por menor diferencia de duración respecto a Spotify
+    if (duracionRefSegs > 0) {
+      const refMs = duracionRefSegs * 1000;
+      verificadas.sort((a, b) => Math.abs(a.full_duration - refMs) - Math.abs(b.full_duration - refMs));
+    }
+
+    for (const pista of verificadas) {
+      const trans = pista.media?.transcodings || [];
+      const progresivo = trans.find((t) => t.format?.protocol === 'progressive');
+      if (progresivo) {
+        try {
+          const streamInfo = await axios.get(progresivo.url, {
+            params: { client_id: clientId },
+            headers: { 'User-Agent': UA },
+            signal: getTimeoutSignal(5000),
+            timeout: 5000,
+            validateStatus: (status) => status === 200
+          });
+          if (streamInfo.data?.url) {
+            console.log(`[Disquera Verificada SC Progressive]: "${pista.title}" - ${pista.publisher_metadata?.artist || pista.user?.username} (${Math.round(pista.full_duration / 1000)}s)`);
+            return {
+              url: streamInfo.data.url.replace(/^http:\/\//i, 'https://'),
+              calidad: '160k',
+              nivel: 4,
+              proveedor: 'Official-Publisher-Progressive'
+            };
+          }
+        } catch (_) {}
+      }
+
+      const hlsMp3 = trans.find(
+        (t) => t.format?.protocol === 'hls' && String(t.format?.mime_type || '').includes('audio/mpeg') && !String(t.format?.mime_type || '').includes('mpegurl')
+      );
+      const hlsAac = trans.find(
+        (t) => t.format?.protocol === 'hls' && String(t.format?.mime_type || '').includes('audio/mp4')
+      );
+      const elegido = hlsMp3 || hlsAac;
+      if (elegido) {
+        try {
+          const streamInfo = await axios.get(elegido.url, {
+            params: { client_id: clientId },
+            headers: { 'User-Agent': UA },
+            signal: getTimeoutSignal(5000),
+            timeout: 5000,
+            validateStatus: (status) => status === 200
+          });
+          if (streamInfo.data?.url) {
+            const m3u8Url = streamInfo.data.url.replace(/^http:\/\//i, 'https://');
+            console.log(`[Disquera Verificada SC HLS]: "${pista.title}" - ${pista.publisher_metadata?.artist || pista.user?.username} (${Math.round(pista.full_duration / 1000)}s)`);
+            return {
+              url: m3u8Url,
+              esHlsSoundCloud: true,
+              calidad: '160k',
+              nivel: 4,
+              proveedor: 'Official-Publisher-HLS'
+            };
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// BÚSQUEDA DISCOGRÁFICA ESTRICTA EN YOUTUBE (TOPIC / PROVIDED TO YOUTUBE BY / VEVO)
 // ---------------------------------------------------------------------------
 async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', duracionRefSegs = 0) {
   const {
@@ -524,74 +810,62 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
     tituloLimpio,
     artista,
     artistaPrincipal,
-    consultaOriginal,
-    consultaRescate
+    consultasDiscograficas
   } = construirConsultasOriginalYRescate(tituloRaw, artistaRaw);
 
-  const filtrarYOrdenarCandidatos = (videos = [], toleranciaSegs = 18) => {
+  // Filtra de inmediato cualquier video que NO cumpla el Filtro de Autor/Canal Obligatorio,
+  // la Lista Negra Estricta y la Validación de Duración Exacta (±10 segundos)
+  const filtrarCandidatosEstrictos = (videos = []) => {
     const prefiltrados = (videos || []).filter(
-      (item) => (item.seconds >= 45 && item.seconds <= 720) || !item.seconds
+      (item) => item && item.videoId && item.seconds >= 45 && item.seconds <= 720
     );
     if (!prefiltrados.length) return [];
 
-    const evaluados = prefiltrados.map((v) => {
+    const validos = [];
+    for (const v of prefiltrados) {
       const autorNombre = v.author ? (v.author.name || v.author) : '';
+      const desc = v.description || '';
       const ev = evaluarCandidatoOriginal({
         tituloCandidato: v.title || '',
         autorCandidato: autorNombre,
+        descripcionCandidato: desc,
         duracionSegsCandidato: v.seconds || 0,
         tituloOriginal: titulo,
-        artistaOriginal: artista,
+        artistaOriginal: artista || artistaPrincipal,
         duracionRefSegs,
-        toleranciaMaxSegs: toleranciaSegs
+        toleranciaMaxSegs: 10
       });
-      return { video: v, ev };
-    });
 
-    // 1. Intento estricto: sin lista negra y dentro de ±18 segundos (cuando duracionRefSegs > 30)
-    const estrictos = evaluados.filter((item) => {
-      if (item.ev.enListaNegra) return false;
-      if (duracionRefSegs > 30 && item.video.seconds > 0 && !item.ev.dentroToleranciaDuracion) return false;
-      return true;
-    });
-
-    if (estrictos.length > 0) {
-      estrictos.sort((a, b) => a.ev.penalizacion - b.ev.penalizacion);
-      return estrictos.map((x) => x.video);
+      // OBLIGATORIO: Solo pasa si canalValido === true, enListaNegra === false, dentroToleranciaDuracion (±10s) === true y coincideTitulo === true
+      if (ev.esAutenticoEstudio) {
+        validos.push({ video: v, ev });
+      }
     }
 
-    // 2. Fallback sin covers pero tolerancia ligeramente mayor si el video oficial tiene outro
-    const sinCovers = evaluados.filter((item) => !item.ev.enListaNegra);
-    if (sinCovers.length > 0) {
-      sinCovers.sort((a, b) => a.ev.penalizacion - b.ev.penalizacion);
-      return sinCovers.map((x) => x.video);
-    }
-
-    return [];
+    if (validos.length === 0) return [];
+    validos.sort((a, b) => a.ev.penalizacion - b.ev.penalizacion);
+    return validos.map((x) => x.video);
   };
 
-  // Intento 1: Consulta principal con formato exacto "${artista} - ${titulo} Official Audio"
-  const consultasIntento = [consultaOriginal];
-  if (consultaRescate && consultaRescate.toLowerCase() !== consultaOriginal.toLowerCase()) {
-    consultasIntento.push(consultaRescate);
-  }
-
-  for (let idx = 0; idx < consultasIntento.length; idx++) {
-    const q = consultasIntento[idx];
+  // Ejecutar las 3 consultas discográficas obligatorias en orden:
+  // 1) "Provided to YouTube by" "${titulo}" "${artista}"
+  // 2) "${titulo}" "${artista} - Topic"
+  // 3) "${artista}" "${titulo}" "Official Audio"
+  for (let idx = 0; idx < consultasDiscograficas.length; idx++) {
+    const consulta = consultasDiscograficas[idx];
     try {
-      const searchResult = await yts(q);
+      const searchResult = await yts(consulta);
       const videos = searchResult && searchResult.videos ? searchResult.videos : [];
-      const mejores = filtrarYOrdenarCandidatos(videos, 18);
-      if (mejores.length > 0) {
-        if (idx > 0) {
-          console.log(`[Rescate YouTube Éxito]: Encontrado con consulta limpia "${q}" -> "${mejores[0].title}"`);
-        }
-        return mejores[0];
+      const oficiales = filtrarCandidatosEstrictos(videos);
+      if (oficiales.length > 0) {
+        const elegido = oficiales[0];
+        console.log(`[Audio Oficial Verificado (Consulta #${idx + 1})]: "${elegido.title}" | Canal: "${elegido.author?.name}" | Duración: ${elegido.seconds}s (Ref: ${duracionRefSegs}s)`);
+        return elegido;
       }
     } catch (_) {}
   }
 
-  // Fallback Invidious con filtro anti-covers
+  // Consultar Invidious con las mismas reglas estrictas de autor/canal y duración ±10s
   const invidiousHosts = [
     'https://inv.nadeko.net',
     'https://invidious.nerdvpn.de',
@@ -599,161 +873,128 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
     'https://invidious.jing.rocks'
   ];
   for (const host of invidiousHosts) {
-    try {
-      const resp = await axios.get(`${host}/api/v1/search`, {
-        params: { q: consultaOriginal, type: 'video' },
-        timeout: 4500,
-        headers: { 'User-Agent': UA }
-      });
-      if (Array.isArray(resp.data) && resp.data.length > 0) {
-        const mapeados = resp.data.map((item) => ({
-          videoId: item.videoId,
-          title: item.title,
-          seconds: item.lengthSeconds || 0,
-          author: { name: item.author || artista }
-        }));
-        const mejores = filtrarYOrdenarCandidatos(mapeados, 18);
-        if (mejores.length > 0) return mejores[0];
-      }
-    } catch (_) {}
+    for (const consulta of consultasDiscograficas.slice(0, 2)) {
+      try {
+        const resp = await axios.get(`${host}/api/v1/search`, {
+          params: { q: consulta, type: 'video' },
+          timeout: 4500,
+          headers: { 'User-Agent': UA }
+        });
+        if (Array.isArray(resp.data) && resp.data.length > 0) {
+          const mapeados = resp.data.map((item) => ({
+            videoId: item.videoId,
+            title: item.title,
+            seconds: item.lengthSeconds || 0,
+            description: item.description || '',
+            author: { name: item.author || '' }
+          }));
+          const oficiales = filtrarCandidatosEstrictos(mapeados);
+          if (oficiales.length > 0) {
+            const elegido = oficiales[0];
+            console.log(`[Audio Oficial Verificado Invidious]: "${elegido.title}" | Canal: "${elegido.author?.name}" | Duración: ${elegido.seconds}s`);
+            return elegido;
+          }
+        }
+      } catch (_) {}
+    }
   }
 
-  // Si todo lo anterior falló, devolver el primer resultado limpio de la consulta de rescate
-  try {
-    const resRescate = await yts(`${artistaPrincipal} ${tituloLimpio}`.trim());
-    const vids = resRescate && resRescate.videos ? resRescate.videos : [];
-    const limpios = filtrarYOrdenarCandidatos(vids, 35);
-    if (limpios.length > 0) return limpios[0];
-    if (vids.length > 0) return vids[0];
-  } catch (_) {}
-
+  // Si ningún resultado pasa el filtro estricto de autenticidad, NO devolver ningún cover de relleno
+  console.warn(`[Filtro Discográfico Estricto]: Ningún video cumplió los requisitos oficiales (Canal Topic/VEVO/Artista, sin covers y ±10s) para "${artista} - ${titulo}"`);
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// FUNCIÓN MAESTRA EN CASCADA CON FILTRO ANTI-COVERS Y RESCATE AUTOMÁTICO
+// FUNCIÓN MAESTRA EN CASCADA (PROHIBIDO COVERS DE RELLENO / SOLO ESTUDIO OFICIAL)
 // ---------------------------------------------------------------------------
 async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') {
   const formato = normalizarFormato(formatoDeseado);
-  const esYouTubeValido = video && video.videoId && video.videoId.length === 11 && !video.videoId.startsWith('itunes_');
-  let videoUrl = esYouTubeValido ? `https://www.youtube.com/watch?v=${video.videoId}` : null;
   const duracionRef = video?.duracionRef || video?.seconds || 0;
   const artistaOriginal = video?.artistaOriginal || (video?.author && video.author.name) || '';
   const tituloOriginal = video?.tituloOriginal || busqueda || video?.title || '';
 
   const {
     titulo,
-    tituloLimpio,
     artista,
-    artistaPrincipal,
-    consultaOriginal,
-    consultaRescate
+    consultaOriginal
   } = construirConsultasOriginalYRescate(tituloOriginal, artistaOriginal);
 
-  console.log(`\n----------------------------------------------------------------------`);
-  console.log(`[Cascada Resiliente Anti-Covers]: Resolviendo "${consultaOriginal}" (ID: ${video?.videoId || 'auto'}, DurRef: ${duracionRef}s, Formato: ${formato})`);
-
-  const metaOriginal = {
-    titulo,
-    artista,
-    toleranciaSegs: 18
-  };
-
-  // 1. NIVEL 1: SoundCloud Progressive + HLS Muxer con formato exacto "${artista} - ${titulo} Official Audio" y filtro ±18s
-  const consultaScPrimaria = artista ? `${artista} - ${titulo}` : consultaOriginal;
-  try {
-    const resSc = await Promise.race([
-      probarSoundCloud(consultaScPrimaria, duracionRef, metaOriginal),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('SoundCloud Timeout 10s')), 10000))
-    ]);
-    if (resSc && resSc.url) {
-      return resSc;
+  // Verificar si el video recibido cumple el filtro estricto de canal oficial y lista negra
+  let videoOficial = video;
+  if (videoOficial && videoOficial.videoId && artista) {
+    const autorVid = videoOficial.author ? (videoOficial.author.name || videoOficial.author) : '';
+    const ev = evaluarCandidatoOriginal({
+      tituloCandidato: videoOficial.title || '',
+      autorCandidato: autorVid,
+      duracionSegsCandidato: videoOficial.seconds || 0,
+      tituloOriginal: titulo,
+      artistaOriginal: artista,
+      duracionRefSegs: duracionRef,
+      toleranciaMaxSegs: 10
+    });
+    if (!ev.esAutenticoEstudio) {
+      console.warn(`[Cascada Oficial]: El video inicial "${videoOficial.title}" (${autorVid}) fue rechazado por el filtro discográfico. Buscando grabación oficial...`);
+      videoOficial = await buscarVideoOriginalEnYouTube(titulo, artista, duracionRef);
     }
-  } catch (eSc) {
-    console.warn(`[Nivel 1 SoundCloud]: Pasando a Nivel 2 (${eSc.message})`);
+  } else if (!videoOficial || !videoOficial.videoId) {
+    videoOficial = await buscarVideoOriginalEnYouTube(titulo, artista, duracionRef);
   }
 
-  // 2. NIVEL 2: Nativo @distube/ytdl-core (YouTube direct stream)
+  const esYouTubeValido = Boolean(
+    videoOficial &&
+    videoOficial.videoId &&
+    videoOficial.videoId.length === 11 &&
+    !videoOficial.videoId.startsWith('itunes_')
+  );
+  const videoUrl = esYouTubeValido ? `https://www.youtube.com/watch?v=${videoOficial.videoId}` : null;
+
+  console.log(`\n----------------------------------------------------------------------`);
+  console.log(`[Cascada Oficial Estudio]: Resolviendo "${consultaOriginal}" (VideoID Oficial: ${videoOficial?.videoId || 'ninguno'}, Canal: "${videoOficial?.author?.name || 'N/A'}", DurRef: ${duracionRef}s)`);
+
+  // 1. NIVEL 1: Extractor nativo @distube/ytdl-core sobre el video OFICIAL verificado (Topic / VEVO / Canal Oficial)
   if (videoUrl) {
     try {
-      const res2 = await Promise.race([
+      const resYtdl = await Promise.race([
         resolverNativoYtdl(videoUrl),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 2 Timeout 8s')), 8000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1 YTDL Timeout 8s')), 8000))
       ]);
-      if (res2 && res2.url) {
-        return res2;
+      if (resYtdl && resYtdl.url) {
+        return resYtdl;
+      }
+    } catch (e1) {
+      console.warn(`[Nivel 1 YTDL Oficial]: Pasando a Nivel 2 (${e1.message})`);
+    }
+  }
+
+  // 2. NIVEL 2: Loader / Savenow sobre el video OFICIAL verificado
+  if (videoUrl) {
+    try {
+      const resLoader = await Promise.race([
+        probarLoaderSavenow(videoUrl, formato),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 2 Loader Timeout 8s')), 8000))
+      ]);
+      if (resLoader && resLoader.url) {
+        return resLoader;
       }
     } catch (e2) {
-      console.warn(`[Nivel 2 YTDL]: Pasando a Nivel 3 (${e2.message})`);
+      console.warn(`[Nivel 2 Loader Oficial]: Pasando a Nivel 3 (${e2.message})`);
     }
   }
 
-  // 3. NIVEL 3: Savenow / Loader fallback
-  if (videoUrl) {
+  // 3. NIVEL 3: Invidious Adaptive Audio Directo sobre el mismo videoId OFICIAL verificado
+  if (esYouTubeValido) {
     try {
-      const res3 = await Promise.race([
-        probarLoaderSavenow(videoUrl, formato),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 3 Timeout 8s')), 8000))
-      ]);
-      if (res3 && res3.url) {
-        return res3;
+      const resInv = await resolverInvidiousDirecto(videoOficial.videoId);
+      if (resInv && resInv.url) {
+        return resInv;
       }
     } catch (e3) {
-      console.warn(`[Nivel 3]: Falló (${e3.message})`);
+      console.warn(`[Nivel 3 Invidious Oficial]: Falló (${e3.message})`);
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 4. SEGUNDO INTENTO DE RESCATE AUTOMÁTICO (Limpia paréntesis/featuring y prueba proveedores alternativos)
-  // -------------------------------------------------------------------------
-  console.log(`[Rescate Automático]: Ejecutando segundo intento de rescate con consulta limpia: "${consultaRescate}"`);
-
-  // 4.A. Rescate en SoundCloud con consulta limpia "${artistaPrincipal} ${tituloLimpio}"
-  const consultaScRescate = `${artistaPrincipal} ${tituloLimpio}`.trim();
-  if (consultaScRescate) {
-    try {
-      const resScRescate = await Promise.race([
-        probarSoundCloud(consultaScRescate, duracionRef, {
-          titulo: tituloLimpio,
-          artista: artistaPrincipal,
-          toleranciaSegs: 25
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('SoundCloud Rescate Timeout 9s')), 9000))
-      ]);
-      if (resScRescate && resScRescate.url) {
-        console.log(`[Rescate Automático Éxito]: Recuperada vía SoundCloud con consulta limpia "${consultaScRescate}"`);
-        return resScRescate;
-      }
-    } catch (_) {}
-  }
-
-  // 4.B. Rescate buscando un video alternativo en YouTube con la consulta limpia "${artistaPrincipal} ${tituloLimpio} audio"
-  try {
-    const videoRescate = await buscarVideoOriginalEnYouTube(tituloLimpio, artistaPrincipal, duracionRef);
-    if (videoRescate && videoRescate.videoId) {
-      const urlVideoRescate = `https://www.youtube.com/watch?v=${videoRescate.videoId}`;
-      if (urlVideoRescate !== videoUrl) {
-        const resYtdlRescate = await Promise.race([
-          resolverNativoYtdl(urlVideoRescate),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Rescate YTDL Timeout 8s')), 8000))
-        ]).catch(() => null);
-        if (resYtdlRescate && resYtdlRescate.url) {
-          console.log(`[Rescate Automático Éxito]: Recuperada vía YTDL con video alternativo (${videoRescate.videoId})`);
-          return resYtdlRescate;
-        }
-      }
-      const resLoaderRescate = await Promise.race([
-        probarLoaderSavenow(urlVideoRescate, formato),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Rescate Loader Timeout 8s')), 8000))
-      ]).catch(() => null);
-      if (resLoaderRescate && resLoaderRescate.url) {
-        console.log(`[Rescate Automático Éxito]: Recuperada vía Loader con video alternativo (${videoRescate.videoId})`);
-        return resLoaderRescate;
-      }
-    }
-  } catch (_) {}
-
-  console.error(`[Cascada Agotada]: Todos los extractores e intentos de rescate fallaron para "${consultaOriginal}".`);
+  // Si ningún resultado pasa este filtro estricto de autenticidad, NO devolver ningún cover de relleno
+  console.error(`[Cascada Oficial]: No se encontró el audio oficial de estudio del artista para "${artista} - ${titulo}".`);
   return null;
 }
 
@@ -766,5 +1007,6 @@ module.exports = {
   construirConsultasOriginalYRescate,
   limpiarTituloParaRescate,
   evaluarCandidatoOriginal,
-  esResultadoEnListaNegra
+  esResultadoEnListaNegra,
+  esCanalAutorOficialValido
 };
