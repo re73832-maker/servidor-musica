@@ -76,14 +76,273 @@ app.use((req, res, next) => {
   next();
 });
 
-// Endpoint de chequeo de salud para Render
+// Endpoint de chequeo de salud para Render y detección OTA automática
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
+    version: 'v4.0.0 Spotify Edition 🚀',
+    cacheVersion: 'app-musica-v4.0.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
+});
+
+// ---------------------------------------------------------------------------
+// ENDPOINT: POST /api/spotify/playlist
+// Extrae metadatos (título, artista, carátula, duración) de una playlist pública
+// de Spotify desde https://open.spotify.com/embed/playlist/${playlistId} sin API Keys
+// ---------------------------------------------------------------------------
+function extraerPlaylistIdSpotify(inputUrl = '') {
+  const limpio = String(inputUrl || '').trim();
+  if (!limpio) return null;
+  const matchUri = limpio.match(/spotify:playlist:([a-zA-Z0-9]{15,35})/i);
+  if (matchUri && matchUri[1]) return matchUri[1];
+  const matchUrl = limpio.match(/playlist\/([a-zA-Z0-9]{15,35})/i);
+  if (matchUrl && matchUrl[1]) return matchUrl[1];
+  if (/^[a-zA-Z0-9]{22}$/.test(limpio)) return limpio;
+  return null;
+}
+
+function decodificarHtmlEntities(str = '') {
+  return String(str || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
+}
+
+app.post('/api/spotify/playlist', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+
+  const rawUrl = (req.body && req.body.url) ? String(req.body.url).trim() : '';
+  const playlistId = extraerPlaylistIdSpotify(rawUrl);
+
+  if (!playlistId) {
+    return res.status(400).json({
+      error: true,
+      mensaje: 'Enlace de Spotify inválido. Pega un enlace válido como https://open.spotify.com/playlist/...'
+    });
+  }
+
+  const embedUrl = `https://open.spotify.com/embed/playlist/${playlistId}`;
+  const publicUrl = `https://open.spotify.com/playlist/${playlistId}`;
+
+  console.log(`\n[/api/spotify/playlist]: Analizando playlist ID: ${playlistId}`);
+
+  try {
+    let nombrePlaylist = 'Playlist de Spotify';
+    let caratulaPlaylist = '';
+    const cancionesExtraidas = [];
+    const vistos = new Set();
+
+    const agregarCancionUnica = (title, artist, thumbnail, durationMs = 0, trackId = '') => {
+      const tLimpio = decodificarHtmlEntities(title);
+      const aLimpio = decodificarHtmlEntities(artist);
+      if (!tLimpio) return;
+      const clave = `${tLimpio.toLowerCase()}:::${aLimpio.toLowerCase()}`;
+      if (vistos.has(clave)) return;
+      vistos.add(clave);
+      const seconds = durationMs > 0 ? Math.round(durationMs / 1000) : 0;
+      const mins = Math.floor(seconds / 60);
+      const rem = seconds % 60;
+      cancionesExtraidas.push({
+        id: trackId || `sp_${playlistId}_${cancionesExtraidas.length + 1}`,
+        title: tLimpio,
+        artist: aLimpio || 'Spotify Artist',
+        thumbnail: thumbnail || caratulaPlaylist || '',
+        seconds,
+        timestamp: seconds > 0 ? `${mins}:${rem < 10 ? '0' : ''}${rem}` : '3:30'
+      });
+    };
+
+    // 1. Consultar la vista embed oficial de Spotify (sin API Keys)
+    let htmlEmbed = '';
+    try {
+      const respEmbed = await axios.get(embedUrl, {
+        headers: {
+          'User-Agent': UA,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7'
+        },
+        signal: AbortSignal.timeout(12000),
+        timeout: 12000
+      });
+      htmlEmbed = typeof respEmbed.data === 'string' ? respEmbed.data : '';
+    } catch (eEmbed) {
+      console.warn('[/api/spotify/playlist]: Aviso al consultar embed:', eEmbed.message);
+    }
+
+    // 1.A. Parsear __NEXT_DATA__ en la vista embed
+    if (htmlEmbed) {
+      const matchNextData = htmlEmbed.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+      if (matchNextData && matchNextData[1]) {
+        try {
+          const nextJson = JSON.parse(matchNextData[1]);
+          const entity =
+            nextJson?.props?.pageProps?.state?.data?.entity ||
+            nextJson?.props?.pageProps?.entity ||
+            nextJson?.props?.pageProps?.state?.data?.playlist ||
+            null;
+
+          if (entity) {
+            if (entity.name || entity.title) {
+              nombrePlaylist = decodificarHtmlEntities(entity.name || entity.title);
+            }
+            const coverImg =
+              entity.coverArt?.sources?.[0]?.url ||
+              entity.images?.[0]?.url ||
+              entity.visualIdentity?.image?.[0]?.url ||
+              '';
+            if (coverImg) caratulaPlaylist = coverImg;
+
+            const trackList =
+              entity.trackList ||
+              entity.tracks?.items ||
+              [];
+
+            if (Array.isArray(trackList)) {
+              for (const item of trackList) {
+                const trackObj = item?.track || item?.itemV2?.data || item;
+                if (!trackObj) continue;
+                const tTitle = trackObj.title || trackObj.name || '';
+                const tArtist =
+                  trackObj.subtitle ||
+                  (Array.isArray(trackObj.artists)
+                    ? trackObj.artists.map((a) => a.name || a.title || '').filter(Boolean).join(', ')
+                    : '') ||
+                  (Array.isArray(trackObj.artists?.items)
+                    ? trackObj.artists.items.map((a) => a.profile?.name || a.name || '').filter(Boolean).join(', ')
+                    : '');
+                const tThumb =
+                  trackObj.album?.images?.[0]?.url ||
+                  trackObj.albumOfTrack?.coverArt?.sources?.[0]?.url ||
+                  trackObj.coverArt?.sources?.[0]?.url ||
+                  trackObj.imageUrl ||
+                  caratulaPlaylist ||
+                  '';
+                const tDur = trackObj.duration || trackObj.duration_ms || trackObj.trackDuration?.totalMilliseconds || 0;
+                const tUri = trackObj.uri || trackObj.id || '';
+                agregarCancionUnica(tTitle, tArtist, tThumb, tDur, tUri);
+              }
+            }
+          }
+        } catch (errJson) {
+          console.warn('[/api/spotify/playlist]: Error parseando __NEXT_DATA__:', errJson.message);
+        }
+      }
+
+      // 1.B. Fallback: Parsear initial-state base64 si existe
+      if (cancionesExtraidas.length === 0) {
+        const matchInitState = htmlEmbed.match(/<script id="initial-state"[^>]*>([\s\S]*?)<\/script>/i);
+        if (matchInitState && matchInitState[1]) {
+          try {
+            const decoded = Buffer.from(matchInitState[1].trim(), 'base64').toString('utf8');
+            const stateJson = JSON.parse(decoded);
+            const entities = stateJson?.entities?.items || {};
+            for (const key of Object.keys(entities)) {
+              const plObj = entities[key];
+              if (plObj?.name) nombrePlaylist = plObj.name;
+              const items = plObj?.content?.items || plObj?.tracks?.items || [];
+              for (const it of items) {
+                const tr = it?.itemV2?.data || it?.track || it;
+                if (!tr) continue;
+                const tTitle = tr.name || tr.title || '';
+                const tArtist = (tr.artists?.items || tr.artists || [])
+                  .map((a) => a?.profile?.name || a?.name || '')
+                  .filter(Boolean)
+                  .join(', ');
+                const tThumb =
+                  tr.albumOfTrack?.coverArt?.sources?.[0]?.url ||
+                  tr.album?.images?.[0]?.url ||
+                  caratulaPlaylist ||
+                  '';
+                const tDur = tr.trackDuration?.totalMilliseconds || tr.duration_ms || 0;
+                agregarCancionUnica(tTitle, tArtist, tThumb, tDur, tr.uri || tr.id || '');
+              }
+            }
+          } catch (_) {}
+        }
+      }
+
+      // 1.C. Fallback Regex directo sobre JSON embebido en el HTML del embed
+      if (cancionesExtraidas.length === 0) {
+        const regexTrackList = /"title"\s*:\s*"((?:[^"\\]|\\.)+)"\s*,\s*"subtitle"\s*:\s*"((?:[^"\\]|\\.)+)"/g;
+        let m;
+        while ((m = regexTrackList.exec(htmlEmbed)) !== null) {
+          try {
+            const t = JSON.parse(`"${m[1]}"`);
+            const a = JSON.parse(`"${m[2]}"`);
+            if (t && a && t.toLowerCase() !== nombrePlaylist.toLowerCase()) {
+              agregarCancionUnica(t, a, caratulaPlaylist, 0);
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    // 2. Si el embed no trajo todas o falló, intentar con la vista pública de open.spotify.com/playlist/${playlistId}
+    if (cancionesExtraidas.length === 0) {
+      try {
+        const respPublic = await axios.get(publicUrl, {
+          headers: {
+            'User-Agent': UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          },
+          signal: AbortSignal.timeout(10000),
+          timeout: 10000
+        });
+        const htmlPub = typeof respPublic.data === 'string' ? respPublic.data : '';
+        if (htmlPub) {
+          const ogTitle = htmlPub.match(/<meta property="og:title" content="([^"]+)"/i);
+          if (ogTitle && ogTitle[1]) nombrePlaylist = decodificarHtmlEntities(ogTitle[1]);
+          const ogImg = htmlPub.match(/<meta property="og:image" content="([^"]+)"/i);
+          if (ogImg && ogImg[1]) caratulaPlaylist = ogImg[1];
+
+          const trackMetaRegex = /"name"\s*:\s*"((?:[^"\\]|\\.)+)"[^}]{0,300}"artists"\s*:\s*\[\s*\{\s*"name"\s*:\s*"((?:[^"\\]|\\.)+)"/g;
+          let mPub;
+          while ((mPub = trackMetaRegex.exec(htmlPub)) !== null) {
+            try {
+              const t = JSON.parse(`"${mPub[1]}"`);
+              const a = JSON.parse(`"${mPub[2]}"`);
+              agregarCancionUnica(t, a, caratulaPlaylist, 0);
+            } catch (_) {}
+          }
+        }
+      } catch (ePub) {
+        console.warn('[/api/spotify/playlist]: Aviso en vista pública:', ePub.message);
+      }
+    }
+
+    if (cancionesExtraidas.length === 0) {
+      return res.status(404).json({
+        error: true,
+        mensaje: 'No se pudieron encontrar canciones en esa playlist. Verifica que la playlist de Spotify sea pública.'
+      });
+    }
+
+    console.log(`[/api/spotify/playlist Éxito]: "${nombrePlaylist}" -> ${cancionesExtraidas.length} canciones extraídas`);
+
+    return res.json({
+      ok: true,
+      playlistId,
+      nombre: nombrePlaylist,
+      caratula: caratulaPlaylist || (cancionesExtraidas[0] && cancionesExtraidas[0].thumbnail) || '',
+      total: cancionesExtraidas.length,
+      canciones: cancionesExtraidas
+    });
+  } catch (error) {
+    console.error('[Error /api/spotify/playlist]:', error.message || error);
+    return res.status(500).json({
+      error: true,
+      mensaje: 'Error al analizar la playlist de Spotify. Intenta nuevamente.'
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
