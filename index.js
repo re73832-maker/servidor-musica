@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.0.0 Spotify Edition 🚀',
-    cacheVersion: 'app-musica-v4.0.0',
+    version: 'v4.0.1 OTA 🚀',
+    cacheVersion: 'app-musica-v4.0.1',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -571,7 +571,9 @@ async function resolverSoundCloud(busqueda, duracionRef) {
 const {
   resolverAudioConCascada,
   ensamblarHlsSoundCloudABuffer,
-  normalizarFormato: normalizarFormatoCascada
+  normalizarFormato: normalizarFormatoCascada,
+  buscarVideoOriginalEnYouTube,
+  construirConsultasOriginalYRescate
 } = require('./utils/cascadeResolver');
 
 // Función maestra para resolver el enlace de descarga directa con soporte de formatos (Cascada de 3 niveles)
@@ -583,46 +585,10 @@ async function resolverDirectAudioUrl(video, busqueda, formatoDeseado = 'mp3') {
 // Cache de búsquedas en memoria (15 minutos de persistencia) para velocidad instantánea
 const cacheBusquedaCanciones = new Map();
 
-// Helper universal para localizar video en YouTube con yt-search e Invidious
-async function buscarVideoEnYouTube(busqueda, artista = '') {
-  const consulta = `${busqueda} ${artista}`.trim();
-  for (let i = 0; i < 2; i++) {
-    try {
-      const searchResult = await yts(`${consulta} audio oficial`);
-      const videos = searchResult && searchResult.videos ? searchResult.videos : [];
-      const v = videos.find((item) => item.seconds >= 60 && item.seconds <= 600)
-        || videos.find((item) => item.seconds > 40)
-        || videos[0];
-      if (v) return v;
-    } catch (_) {
-      if (i < 1) await new Promise((r) => setTimeout(r, 300));
-    }
-  }
-
-  const invidiousHosts = [
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://yewtu.be',
-    'https://invidious.jing.rocks'
-  ];
-  for (const host of invidiousHosts) {
-    try {
-      const resp = await axios.get(`${host}/api/v1/search`, {
-        params: { q: `${consulta} audio`, type: 'video' },
-        timeout: 4500,
-        headers: { 'User-Agent': UA }
-      });
-      if (Array.isArray(resp.data) && resp.data.length > 0) {
-        const item = resp.data[0];
-        return {
-          videoId: item.videoId,
-          title: item.title,
-          seconds: item.lengthSeconds || 0,
-          author: { name: item.author || artista }
-        };
-      }
-    } catch (_) {}
-  }
+// Helper universal para localizar video en YouTube con filtro estricto anti-covers y duración ±18s
+async function buscarVideoEnYouTube(busqueda, artista = '', duracionRefSegs = 0) {
+  const videoOriginal = await buscarVideoOriginalEnYouTube(busqueda, artista, duracionRefSegs);
+  if (videoOriginal) return videoOriginal;
   return null;
 }
 
@@ -812,11 +778,19 @@ app.get('/api/obtener-enlace', async (req, res) => {
       video = {
         videoId: videoId,
         seconds: duracionSugerida,
+        duracionRef: duracionSugerida,
         title: busqueda,
+        tituloOriginal: busqueda,
+        artistaOriginal: artistaSugerido,
         author: { name: artistaSugerido }
       };
     } else {
-      video = await buscarVideoEnYouTube(busqueda, artistaSugerido);
+      video = await buscarVideoEnYouTube(busqueda, artistaSugerido, duracionSugerida);
+      if (video) {
+        video.duracionRef = duracionSugerida || video.seconds || 0;
+        video.tituloOriginal = busqueda;
+        video.artistaOriginal = artistaSugerido;
+      }
     }
 
     if (!video) {
@@ -1102,11 +1076,19 @@ app.get('/api/descargar-cancion', async (req, res) => {
       video = {
         videoId: videoId,
         seconds: duracionSugerida,
+        duracionRef: duracionSugerida,
         title: busqueda,
+        tituloOriginal: busqueda,
+        artistaOriginal: artistaSugerido,
         author: { name: artistaSugerido }
       };
     } else {
-      video = await buscarVideoEnYouTube(busqueda, artistaSugerido);
+      video = await buscarVideoEnYouTube(busqueda, artistaSugerido, duracionSugerida);
+      if (video) {
+        video.duracionRef = duracionSugerida || video.seconds || 0;
+        video.tituloOriginal = busqueda;
+        video.artistaOriginal = artistaSugerido;
+      }
     }
 
     if (!video) {
