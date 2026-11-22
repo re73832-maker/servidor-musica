@@ -6,6 +6,14 @@ const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
 const { buscarGrabacionesMusicBrainz } = require('./utils/musicBrainzService');
+const JamendoSource = require('./sources/JamendoSource');
+const InternetArchiveSource = require('./sources/InternetArchiveSource');
+const LegacyScraperSource = require('./sources/LegacyScraperSource');
+
+const jamendoSource = new JamendoSource();
+const internetArchiveSource = new InternetArchiveSource();
+const legacyScraperSource = new LegacyScraperSource();
+const ENABLE_LEGACY_SCRAPERS = process.env.ENABLE_LEGACY_SCRAPERS === 'true';
 
 const app = express();
 const PUERTO = process.env.PORT || 4000;
@@ -549,91 +557,28 @@ app.get('/api/buscar-canciones', async (req, res) => {
   console.log(`\n======================================================================`);
   console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/buscar-canciones: "${busqueda}"`);
 
-  let videos = [];
+  const fuentesActivas = [jamendoSource, internetArchiveSource, legacyScraperSource].filter((f) =>
+    f.isEnabled()
+  );
 
-  try {
-    const searchResult = await yts(busqueda);
-    if (searchResult && searchResult.videos && searchResult.videos.length > 0) {
-      videos = searchResult.videos;
-    }
-  } catch (e) {
-    console.warn(`[yt-search falló]:`, e.code || e.message);
-  }
+  const lotesResultados = await Promise.all(
+    fuentesActivas.map((fuente) => fuente.search(busqueda, 15).catch(() => []))
+  );
 
-  // Fallback 1: Invidious si yt-search falló
-  if (!videos || videos.length === 0) {
-    const invidiousHosts = [
-      'https://inv.nadeko.net',
-      'https://invidious.nerdvpn.de',
-      'https://yewtu.be',
-      'https://invidious.jing.rocks'
-    ];
-    for (const host of invidiousHosts) {
-      try {
-        const resp = await axios.get(`${host}/api/v1/search`, {
-          params: { q: busqueda, type: 'video' },
-          timeout: 4000,
-          headers: { 'User-Agent': UA }
-        });
-        if (Array.isArray(resp.data) && resp.data.length > 0) {
-          videos = resp.data.map((item) => ({
-            videoId: item.videoId,
-            title: item.title,
-            author: { name: item.author || '' },
-            seconds: item.lengthSeconds || 0,
-            timestamp: `${Math.floor((item.lengthSeconds || 0) / 60)}:${(item.lengthSeconds || 0) % 60 < 10 ? '0' : ''}${(item.lengthSeconds || 0) % 60}`,
-            thumbnail: (item.videoThumbnails && item.videoThumbnails[0]) ? item.videoThumbnails[0].url : ''
-          }));
-          break;
-        }
-      } catch (_) {}
-    }
-  }
+  const resultadosCombinados = lotesResultados.flat();
 
-  // Fallback 2: iTunes Search API oficial (Alta resiliencia sin bloqueo)
-  if (!videos || videos.length === 0) {
-    try {
-      const itunesRes = await axios.get('https://itunes.apple.com/search', {
-        params: { term: busqueda, media: 'music', entity: 'song', limit: 25 },
-        timeout: 5000,
-        headers: { 'User-Agent': UA }
-      });
-      if (itunesRes.data && Array.isArray(itunesRes.data.results) && itunesRes.data.results.length > 0) {
-        videos = itunesRes.data.results.map((item) => {
-          const seg = Math.round((item.trackTimeMillis || 0) / 1000);
-          const min = Math.floor(seg / 60);
-          const rem = seg % 60;
-          return {
-            videoId: `itunes_${item.trackId}`,
-            title: item.trackName || '',
-            author: { name: item.artistName || '' },
-            seconds: seg,
-            timestamp: `${min}:${rem < 10 ? '0' : ''}${rem}`,
-            thumbnail: (item.artworkUrl100 || '').replace('100x100bb', '600x600bb'),
-            previewUrl: item.previewUrl || ''
-          };
-        });
-      }
-    } catch (eItunes) {
-      console.warn('[iTunes search falló]:', eItunes.message);
-    }
-  }
-
-  // Filtrar canciones individuales (evitar mixes de 2 horas)
-  const filtrados = (videos || [])
-    .filter((v) => (v.seconds >= 40 && v.seconds <= 900) || (!v.seconds && v.timestamp))
-    .slice(0, 25);
-
-  const listaFinal = filtrados.length > 0 ? filtrados : (videos || []).slice(0, 15);
-
-  const resultados = listaFinal.map((v) => ({
-    videoId: v.videoId,
+  const resultados = resultadosCombinados.slice(0, 30).map((v) => ({
+    videoId: v.videoId || v.id,
     title: v.title,
-    artist: v.author ? (v.author.name || v.author) : '',
+    artist: v.artist || v.author || '',
+    author: v.author || v.artist || '',
+    license: v.license || 'Creative Commons',
     timestamp: v.timestamp || `${Math.floor((v.seconds || 0) / 60)}:${(v.seconds || 0) % 60 < 10 ? '0' : ''}${(v.seconds || 0) % 60}`,
     seconds: v.seconds || 0,
     thumbnail: v.thumbnail || v.image || '',
-    previewUrl: v.previewUrl || ''
+    previewUrl: v.previewUrl || v.streamUrl || '',
+    streamUrl: v.streamUrl || '',
+    sourceVersion: v.sourceVersion || 'cc_source'
   }));
 
   // Guardar en cache para respuestas inmediatas posteriores
@@ -682,6 +627,32 @@ app.get('/api/obtener-enlace', async (req, res) => {
       return res.status(status).json(payload);
     }
   };
+
+  const videoIdParam = String(req.query.videoId || '').trim();
+  if (videoIdParam.startsWith('jamendo:') || videoIdParam.startsWith('ia:')) {
+    try {
+      const fuente = videoIdParam.startsWith('jamendo:') ? jamendoSource : internetArchiveSource;
+      const streamInfo = await fuente.getStream(videoIdParam);
+      if (!streamInfo || !streamInfo.downloadUrl) {
+        return finalizar(404, { error: true, mensaje: 'No se encontró enlace de audio con licencia para esta pista.' });
+      }
+      return finalizar(200, {
+        title: String(req.query.q || ''),
+        artist: streamInfo.author || String(req.query.artist || ''),
+        license: streamInfo.license,
+        downloadUrl: streamInfo.downloadUrl
+      });
+    } catch (errCc) {
+      return finalizar(502, { error: true, mensaje: errCc?.message || 'Error resolviendo fuente con licencia' });
+    }
+  }
+
+  if (!ENABLE_LEGACY_SCRAPERS) {
+    return finalizar(403, {
+      error: true,
+      mensaje: 'Las fuentes legacy de scraping están desactivadas por configuración (ENABLE_LEGACY_SCRAPERS=false).'
+    });
+  }
 
   req.on('close', () => {
     clearTimeout(timeoutGuard);
