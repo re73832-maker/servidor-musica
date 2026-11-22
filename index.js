@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.5.0 YTMusic-DDEX 🚀',
-    cacheVersion: 'app-musica-v4.5.0',
+    version: 'v4.6.0 Studio-Pure 🚀',
+    cacheVersion: 'app-musica-v4.6.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -818,7 +818,7 @@ app.post('/api/resolver-oficial', async (req, res) => {
     const video = await buscarVideoEnYouTube(titulo, artista, duracionSegundos, isrc);
     if (!video) {
       clearTimeout(timeoutGuard);
-      return res.status(404).json({ error: true, mensaje: 'Pista oficial de estudio no disponible en YouTube Music' });
+      return res.status(404).json({ error: true, mensaje: 'Pista oficial de estudio no disponible' });
     }
 
     video.duracionRef = duracionSegundos || video.seconds || 0;
@@ -833,7 +833,7 @@ app.post('/api/resolver-oficial', async (req, res) => {
 
     if (!resultadoAudio || !resultadoAudio.url) {
       clearTimeout(timeoutGuard);
-      return res.status(404).json({ error: true, mensaje: 'Pista oficial de estudio no disponible en YouTube Music' });
+      return res.status(404).json({ error: true, mensaje: 'Pista oficial de estudio no disponible' });
     }
 
     const downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');

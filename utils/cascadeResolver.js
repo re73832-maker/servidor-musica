@@ -1,4 +1,5 @@
 const axios = require('axios');
+const yts = require('yt-search');
 const YTMusicPkg = require('ytmusic-api');
 const YTMusic = YTMusicPkg.default || YTMusicPkg;
 const { Ytdl } = require('@distube/ytdl-core');
@@ -89,11 +90,14 @@ const PALABRAS_LISTA_NEGRA_ESTRICTA = [
   'intro',
   'dj',
   'mix',
-  'concierto'
+  'concierto',
+  'beat',
+  'skit',
+  'video'
 ];
 
-// Tolerancia máxima de duración frente al máster oficial de estudio (v4.5.0 YTMusic-DDEX: ±3s)
-const TOLERANCIA_DURACION_OFICIAL_SEGS = 3;
+// Tolerancia máxima de duración frente al máster oficial de estudio (v4.6.0 Studio-Pure: ±2s)
+const TOLERANCIA_DURACION_OFICIAL_SEGS = 2;
 
 // ---------------------------------------------------------------------------
 // PASO A — VERIFICACIÓN DE MÁSTER OFICIAL (Deezer API pública + respaldo iTunes)
@@ -169,7 +173,7 @@ async function obtenerMasterOficial(titulo = '', artista = '', duracionSpotifySe
     try {
       const q = `artist:"${artista}" track:"${titulo}"`;
       const r = await axios.get('https://api.deezer.com/search', {
-        params: { q, limit: 3 },
+        params: { q, limit: 5 },
         timeout: 6000,
         headers: { 'User-Agent': UA }
       });
@@ -718,12 +722,13 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
   console.log(`[YTMusic-DDEX v4.5.0]: "${artistaPrincipal} - ${tituloLimpio}" | Spotify: ${duracionSpotifySegs || 0}s | Máster: ${master ? `${master.duracionOficialSeg}s (${master.fuente})` : 'N/D'} | Ref estricta: ${duracionRefSegs}s ±${TOLERANCIA_DURACION_OFICIAL_SEGS}s`);
 
   // 2. Consultar EXCLUSIVAMENTE ytmusic.searchSongs(...) (categoría SONG DDEX)
-  let ytmusic;
+  let ytmusic = null;
+  let ytmusicFallo = false;
   try {
     ytmusic = await obtenerClienteYTMusic();
   } catch (errInit) {
-    console.error('[YTMusic-DDEX]: Error inicializando ytmusic-api:', errInit.message);
-    return null;
+    ytmusicFallo = true;
+    console.warn('[Studio-Pure]: ytmusic-api falló al inicializar, activando respaldo estricto - Topic:', errInit.message);
   }
 
   const consultas = [];
@@ -738,71 +743,131 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
   const candidatosValidos = [];
   const vistos = new Set();
 
-  for (const q of consultas) {
-    let songs = [];
-    try {
-      songs = await ytmusic.searchSongs(q);
-    } catch (errSearch) {
-      console.warn(`[YTMusic-DDEX]: Falló searchSongs("${q}"):`, errSearch.message);
-      continue;
-    }
-
-    for (const song of songs || []) {
-      if (!song || song.type !== 'SONG' || !song.videoId || vistos.has(song.videoId)) continue;
-      vistos.add(song.videoId);
-
-      const songTitle = String(song.name || '').trim();
-      const songArtists = [];
-      if (song.artist && song.artist.name) songArtists.push(song.artist.name);
-      if (Array.isArray(song.artists)) {
-        for (const a of song.artists) {
-          if (a && a.name) songArtists.push(a.name);
-        }
-      }
-      const songArtistText = Array.from(new Set(songArtists)).join(', ');
-      const songDuration = Number(song.duration) || 0;
-
-      // 3a. Lista negra estricta (por si alguna edición live/remix/karaoke entra)
-      if (esResultadoEnListaNegra(songTitle, songArtistText, titulo)) continue;
-
-      // 3b. Validación estricta de artista coincidente con el artista solicitado
-      const normSongArtist = normalizarTextoSimple(songArtistText);
-      const artistaCoincide =
-        artistasAceptados.length === 0 ||
-        artistasAceptados.some((art) => normSongArtist && (normSongArtist.includes(art) || art.includes(normSongArtist)));
-      if (!artistaCoincide) continue;
-
-      // 3c. Validación de título coincidente
-      const normSongTitle = normalizarTextoSimple(songTitle);
-      const palabrasCoinciden = palabrasTitulo.filter((w) => normSongTitle.includes(w));
-      const tituloCoincide =
-        !normTituloOrig ||
-        normSongTitle.includes(normTituloOrig) ||
-        normTituloOrig.includes(normSongTitle) ||
-        (palabrasTitulo.length > 0 && palabrasCoinciden.length >= Math.ceil(palabrasTitulo.length * 0.7));
-      if (!tituloCoincide) continue;
-
-      // 3d. Validación estricta de duración (±3 segundos respecto a Deezer/Spotify)
-      const diffSegs = duracionRefSegs > 0 ? Math.abs(songDuration - duracionRefSegs) : 0;
-      if (duracionRefSegs > 0 && (songDuration <= 0 || diffSegs > TOLERANCIA_DURACION_OFICIAL_SEGS)) {
+  if (ytmusic) {
+    for (const q of consultas) {
+      let songs = [];
+      try {
+        songs = await ytmusic.searchSongs(q);
+      } catch (errSearch) {
+        ytmusicFallo = true;
+        console.warn(`[Studio-Pure]: Falló searchSongs("${q}"):`, errSearch.message);
         continue;
       }
 
-      candidatosValidos.push({
-        song,
-        songTitle,
-        songArtistText,
-        songDuration,
-        diffSegs
-      });
-    }
+      if (!Array.isArray(songs) || songs.length === 0) {
+        ytmusicFallo = true;
+      }
 
-    if (candidatosValidos.length > 0) break;
+      for (const song of songs || []) {
+        if (!song || song.type !== 'SONG' || !song.videoId || vistos.has(song.videoId)) continue;
+        vistos.add(song.videoId);
+
+        const songTitle = String(song.name || '').trim();
+        const songArtists = [];
+        if (song.artist && song.artist.name) songArtists.push(song.artist.name);
+        if (Array.isArray(song.artists)) {
+          for (const a of song.artists) {
+            if (a && a.name) songArtists.push(a.name);
+          }
+        }
+        const songArtistText = Array.from(new Set(songArtists)).join(', ');
+        const songDuration = Number(song.duration) || 0;
+
+        if (esResultadoEnListaNegra(songTitle, songArtistText, titulo)) continue;
+
+        const normSongArtist = normalizarTextoSimple(songArtistText);
+        const artistaCoincide =
+          artistasAceptados.length === 0 ||
+          artistasAceptados.some((art) => normSongArtist && (normSongArtist.includes(art) || art.includes(normSongArtist)));
+        if (!artistaCoincide) continue;
+
+        const normSongTitle = normalizarTextoSimple(songTitle);
+        const palabrasCoinciden = palabrasTitulo.filter((w) => normSongTitle.includes(w));
+        const tituloCoincide =
+          !normTituloOrig ||
+          normSongTitle.includes(normTituloOrig) ||
+          normTituloOrig.includes(normSongTitle) ||
+          (palabrasTitulo.length > 0 && palabrasCoinciden.length >= Math.ceil(palabrasTitulo.length * 0.7));
+        if (!tituloCoincide) continue;
+
+        // Tolerancia estricta ±2 segundos respecto a duracionMasterSeg
+        const diffSegs = duracionRefSegs > 0 ? Math.abs(songDuration - duracionRefSegs) : 0;
+        if (duracionRefSegs > 0 && (songDuration <= 0 || diffSegs > TOLERANCIA_DURACION_OFICIAL_SEGS)) {
+          continue;
+        }
+
+        candidatosValidos.push({
+          song,
+          songTitle,
+          songArtistText,
+          songDuration,
+          diffSegs
+        });
+      }
+
+      if (candidatosValidos.length > 0) break;
+    }
   }
 
-  // 4. Cero Video Fallbacks: si ytmusic.searchSongs no devuelve pista oficial coincidente, devolver null (-> 404)
+  // 3. Respaldo ÚNICAMENTE si ytmusic-api falló en Render (bloqueo regional / vacío):
+  // Canales autogenerados por disquera (" - Topic" / "Provided to YouTube by") con tolerancia estricta ±2s
+  if (candidatosValidos.length === 0 && ytmusicFallo && artistaPrincipal && tituloLimpio) {
+    const consultasTopic = [
+      `"${tituloLimpio}" "${artistaPrincipal} - Topic"`,
+      `"Provided to YouTube by" "${tituloLimpio}" "${artistaPrincipal}"`
+    ];
+    for (const qTopic of consultasTopic) {
+      try {
+        const resTopic = await yts(qTopic);
+        const videos = resTopic && Array.isArray(resTopic.videos) ? resTopic.videos : [];
+        for (const v of videos) {
+          if (!v || !v.videoId || vistos.has(v.videoId)) continue;
+          vistos.add(v.videoId);
+
+          const autorNombre = String((v.author && v.author.name) || v.author || '').trim();
+          const desc = String(v.description || '');
+          const esCanalTopicDisquera =
+            autorNombre.endsWith(' - Topic') || desc.includes('Provided to YouTube by');
+          if (!esCanalTopicDisquera) continue;
+
+          if (esResultadoEnListaNegra(v.title || '', autorNombre, titulo)) continue;
+
+          const normAutor = normalizarTextoSimple(autorNombre);
+          const artistaCoincide =
+            artistasAceptados.length === 0 ||
+            artistasAceptados.some((art) => normAutor && normAutor.includes(art));
+          if (!artistaCoincide) continue;
+
+          const normVidTitle = normalizarTextoSimple(v.title || '');
+          const palabrasCoinciden = palabrasTitulo.filter((w) => normVidTitle.includes(w));
+          const tituloCoincide =
+            !normTituloOrig ||
+            normVidTitle.includes(normTituloOrig) ||
+            (palabrasTitulo.length > 0 && palabrasCoinciden.length >= Math.ceil(palabrasTitulo.length * 0.7));
+          if (!tituloCoincide) continue;
+
+          const durVid = Number(v.seconds) || 0;
+          const diffSegs = duracionRefSegs > 0 ? Math.abs(durVid - duracionRefSegs) : 0;
+          if (duracionRefSegs > 0 && (durVid <= 0 || diffSegs > TOLERANCIA_DURACION_OFICIAL_SEGS)) {
+            continue;
+          }
+
+          candidatosValidos.push({
+            song: { videoId: v.videoId },
+            songTitle: v.title || tituloLimpio,
+            songArtistText: autorNombre,
+            songDuration: durVid,
+            diffSegs
+          });
+        }
+        if (candidatosValidos.length > 0) break;
+      } catch (_) {}
+    }
+  }
+
+  // 4. Cero Relleno: si ningún resultado cumple estas condiciones exactas, devolver null (-> 404)
   if (candidatosValidos.length === 0) {
-    console.warn(`[YTMusic-DDEX]: Pista oficial de estudio no disponible en YouTube Music para "${artistaPrincipal} - ${tituloLimpio}"`);
+    console.warn(`[Studio-Pure]: Pista oficial de estudio no disponible para "${artistaPrincipal} - ${tituloLimpio}"`);
     return null;
   }
 
