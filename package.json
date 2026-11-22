@@ -20,6 +20,7 @@
     "axios": "^1.20.0",
     "cors": "^2.8.6",
     "express": "^5.3.0",
-    "yt-search": "^2.13.1"
+    "yt-search": "^2.13.1",
+    "ytmusic-api": "^6.0.0"
   }
 }

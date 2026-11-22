@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.3.1 UI Pro 🚀',
-    cacheVersion: 'app-musica-v4.3.1',
+    version: 'v4.5.0 YTMusic-DDEX 🚀',
+    cacheVersion: 'app-musica-v4.5.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -512,9 +512,9 @@ async function resolverDirectAudioUrl(video, busqueda, formatoDeseado = 'mp3') {
 // Cache de búsquedas en memoria (15 minutos de persistencia) para velocidad instantánea
 const cacheBusquedaCanciones = new Map();
 
-// Helper universal para localizar video en YouTube con filtro estricto anti-covers y duración ±18s
-async function buscarVideoEnYouTube(busqueda, artista = '', duracionRefSegs = 0) {
-  const videoOriginal = await buscarVideoOriginalEnYouTube(busqueda, artista, duracionRefSegs);
+// Helper universal para localizar pista oficial DDEX en YouTube Music (categoría SONG)
+async function buscarVideoEnYouTube(busqueda, artista = '', duracionRefSegs = 0, isrc = '') {
+  const videoOriginal = await buscarVideoOriginalEnYouTube(busqueda, artista, duracionRefSegs, isrc);
   if (videoOriginal) return videoOriginal;
   return null;
 }
@@ -791,6 +791,7 @@ app.post('/api/resolver-oficial', async (req, res) => {
 
   const titulo = String(req.body?.titulo || '').trim();
   const artista = String(req.body?.artista || '').trim();
+  const isrc = String(req.body?.isrc || '').trim();
   const duracionSegundos = parseInt(req.body?.duracionSegundos) || 0;
 
   if (!titulo) {
@@ -813,11 +814,11 @@ app.post('/api/resolver-oficial', async (req, res) => {
   });
 
   try {
-    console.log(`\n[POST /api/resolver-oficial]: "${artista ? `${artista} - ` : ''}${titulo}" (durRef: ${duracionSegundos}s)`);
-    const video = await buscarVideoEnYouTube(titulo, artista, duracionSegundos);
+    console.log(`\n[POST /api/resolver-oficial]: "${artista ? `${artista} - ` : ''}${titulo}" (durRef: ${duracionSegundos}s${isrc ? `, ISRC: ${isrc}` : ''})`);
+    const video = await buscarVideoEnYouTube(titulo, artista, duracionSegundos, isrc);
     if (!video) {
       clearTimeout(timeoutGuard);
-      return res.status(404).json({ error: true, mensaje: 'Audio oficial no disponible' });
+      return res.status(404).json({ error: true, mensaje: 'Pista oficial de estudio no disponible en YouTube Music' });
     }
 
     video.duracionRef = duracionSegundos || video.seconds || 0;
@@ -832,7 +833,7 @@ app.post('/api/resolver-oficial', async (req, res) => {
 
     if (!resultadoAudio || !resultadoAudio.url) {
       clearTimeout(timeoutGuard);
-      return res.status(404).json({ error: true, mensaje: 'Audio oficial no disponible' });
+      return res.status(404).json({ error: true, mensaje: 'Pista oficial de estudio no disponible en YouTube Music' });
     }
 
     const downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');

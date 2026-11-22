@@ -1,9 +1,32 @@
 const axios = require('axios');
-const yts = require('yt-search');
+const YTMusicPkg = require('ytmusic-api');
+const YTMusic = YTMusicPkg.default || YTMusicPkg;
 const { Ytdl } = require('@distube/ytdl-core');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const ytdlInstance = new Ytdl();
+
+// Instancia cacheada en memoria del cliente oficial YouTube Music (categoría SONG DDEX)
+let ytmusicInstancia = null;
+let ytmusicInitPromise = null;
+
+async function obtenerClienteYTMusic() {
+  if (ytmusicInstancia) return ytmusicInstancia;
+  if (!ytmusicInitPromise) {
+    const cliente = new YTMusic();
+    ytmusicInitPromise = cliente
+      .initialize()
+      .then(() => {
+        ytmusicInstancia = cliente;
+        return cliente;
+      })
+      .catch((err) => {
+        ytmusicInitPromise = null;
+        throw err;
+      });
+  }
+  return ytmusicInitPromise;
+}
 
 // Helper seguro para AbortSignal.timeout
 function getTimeoutSignal(ms = 10000) {
@@ -69,8 +92,8 @@ const PALABRAS_LISTA_NEGRA_ESTRICTA = [
   'concierto'
 ];
 
-// Tolerancia máxima de duración frente al máster oficial de estudio (v4.3.0: ±5s)
-const TOLERANCIA_DURACION_OFICIAL_SEGS = 5;
+// Tolerancia máxima de duración frente al máster oficial de estudio (v4.5.0 YTMusic-DDEX: ±3s)
+const TOLERANCIA_DURACION_OFICIAL_SEGS = 3;
 
 // ---------------------------------------------------------------------------
 // PASO A — VERIFICACIÓN DE MÁSTER OFICIAL (Deezer API pública + respaldo iTunes)
@@ -103,9 +126,10 @@ function coincideMaster(tituloCand, artistaCand, tituloRef, artistaRef) {
   return Boolean(coincTit && coincArt);
 }
 
-async function obtenerMasterOficial(titulo = '', artista = '', duracionSpotifySegs = 0) {
-  if (!titulo || !artista) return null;
-  const clave = `${normMaster(artista)}|${normMaster(titulo)}`;
+async function obtenerMasterOficial(titulo = '', artista = '', duracionSpotifySegs = 0, isrc = '') {
+  const isrcLimpio = String(isrc || '').trim();
+  if (!isrcLimpio && (!titulo || !artista)) return null;
+  const clave = isrcLimpio ? `isrc:${isrcLimpio}` : `${normMaster(artista)}|${normMaster(titulo)}`;
   const cached = cacheMasterOficial.get(clave);
   if (cached && Date.now() - cached.t < 6 * 60 * 60 * 1000) return cached.data;
 
@@ -120,25 +144,47 @@ async function obtenerMasterOficial(titulo = '', artista = '', duracionSpotifySe
 
   let resultado = null;
 
-  // 1) Deezer API pública
-  try {
-    const q = `artist:"${artista}" track:"${titulo}"`;
-    const r = await axios.get('https://api.deezer.com/search', {
-      params: { q, limit: 3 },
-      timeout: 6000,
-      headers: { 'User-Agent': UA }
-    });
-    const lista = Array.isArray(r.data?.data) ? r.data.data : [];
-    resultado = elegirMejor(
-      lista.map((it) => ({
-        titulo: it.title || it.title_short || '',
-        artista: it.artist?.name || '',
-        duracionOficialSeg: Number(it.duration) || 0,
-        fuente: 'Deezer'
-      }))
-    );
-  } catch (eDz) {
-    console.warn('[Máster Oficial Deezer]: aviso', eDz.message);
+  // 0) Si hay ISRC, consultar directamente el máster oficial en Deezer
+  if (isrcLimpio) {
+    try {
+      const rIsrc = await axios.get(`https://api.deezer.com/track/isrc:${encodeURIComponent(isrcLimpio)}`, {
+        timeout: 6000,
+        headers: { 'User-Agent': UA }
+      });
+      if (rIsrc.data && !rIsrc.data.error && Number(rIsrc.data.duration) >= 30) {
+        resultado = {
+          titulo: rIsrc.data.title || rIsrc.data.title_short || titulo,
+          artista: rIsrc.data.artist?.name || artista,
+          duracionOficialSeg: Number(rIsrc.data.duration),
+          fuente: 'Deezer-ISRC'
+        };
+      }
+    } catch (eIsrc) {
+      console.warn('[Máster Oficial Deezer ISRC]: aviso', eIsrc.message);
+    }
+  }
+
+  // 1) Deezer API pública por artista + track
+  if (!resultado && titulo && artista) {
+    try {
+      const q = `artist:"${artista}" track:"${titulo}"`;
+      const r = await axios.get('https://api.deezer.com/search', {
+        params: { q, limit: 3 },
+        timeout: 6000,
+        headers: { 'User-Agent': UA }
+      });
+      const lista = Array.isArray(r.data?.data) ? r.data.data : [];
+      resultado = elegirMejor(
+        lista.map((it) => ({
+          titulo: it.title || it.title_short || '',
+          artista: it.artist?.name || '',
+          duracionOficialSeg: Number(it.duration) || 0,
+          fuente: 'Deezer'
+        }))
+      );
+    } catch (eDz) {
+      console.warn('[Máster Oficial Deezer]: aviso', eDz.message);
+    }
   }
 
   // 2) Respaldo: iTunes Search API
@@ -642,142 +688,140 @@ async function resolverInvidiousDirecto(videoId) {
 }
 
 // ---------------------------------------------------------------------------
-// BÚSQUEDA DISCOGRÁFICA ESTRICTA EN YOUTUBE (TOPIC / PROVIDED TO YOUTUBE BY / VEVO)
+// BÚSQUEDA EXCLUSIVA EN YOUTUBE MUSIC: CATEGORÍA SONG (PISTAS DDEX DE ESTUDIO)
+// Cero búsqueda de videos generales (ni yt-search ni Invidious video search)
 // ---------------------------------------------------------------------------
-async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', duracionSpotifySegs = 0) {
+async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', duracionSpotifySegs = 0, isrc = '') {
   const {
     titulo,
     tituloLimpio,
     artista,
-    artistaPrincipal,
-    consultasDiscograficas
+    artistaPrincipal
   } = construirConsultasOriginalYRescate(tituloRaw, artistaRaw);
 
-  // PASO A — Verificación de Máster Oficial (Deezer / iTunes) ANTES de buscar el audio descargable
+  // 1. Consultar primero la duración exacta del máster en Deezer (ISRC o búsqueda) / iTunes
   let master = null;
-  if (artistaPrincipal && tituloLimpio) {
+  if (isrc || (artistaPrincipal && tituloLimpio)) {
     try {
-      master = await obtenerMasterOficial(tituloLimpio, artistaPrincipal, Number(duracionSpotifySegs) || 0);
+      master = await obtenerMasterOficial(tituloLimpio, artistaPrincipal, Number(duracionSpotifySegs) || 0, isrc);
     } catch (_) {
       master = null;
     }
   }
   const duracionRefSegs = resolverDuracionReferencia(duracionSpotifySegs, master);
-  const artistasAceptados = [artista || artistaPrincipal, master && master.artistaCanonico]
+  const artistasAceptados = [artista, artistaPrincipal, master && master.artistaCanonico]
     .filter(Boolean)
-    .join(', ');
+    .flatMap((a) => String(a).split(/,|;|\/|&|\bfeat\.?\b|\bft\.?\b/i))
+    .map((a) => normalizarTextoSimple(a))
+    .filter((a) => a.length >= 2);
 
-  console.log(`[Búsqueda Discográfica v4.2.0]: "${artistaPrincipal} - ${tituloLimpio}" | Spotify: ${duracionSpotifySegs || 0}s | Máster: ${master ? `${master.duracionOficialSeg}s (${master.fuente})` : 'N/D'} | Ref estricta: ${duracionRefSegs}s ±${TOLERANCIA_DURACION_OFICIAL_SEGS}s`);
+  console.log(`[YTMusic-DDEX v4.5.0]: "${artistaPrincipal} - ${tituloLimpio}" | Spotify: ${duracionSpotifySegs || 0}s | Máster: ${master ? `${master.duracionOficialSeg}s (${master.fuente})` : 'N/D'} | Ref estricta: ${duracionRefSegs}s ±${TOLERANCIA_DURACION_OFICIAL_SEGS}s`);
 
-  // PASO C — Filtro Inflexible de Autenticidad (canal oficial + lista negra + duración ±4s)
-  const evaluarLista = (videos = []) => {
-    const validos = [];
-    for (const v of videos || []) {
-      if (!v || !v.videoId || !(v.seconds >= 45 && v.seconds <= 720)) continue;
-      const autorNombre = v.author ? (v.author.name || v.author) : '';
-      const ev = evaluarCandidatoOriginal({
-        tituloCandidato: v.title || '',
-        autorCandidato: autorNombre,
-        descripcionCandidato: v.description || '',
-        duracionSegsCandidato: v.seconds || 0,
-        tituloOriginal: titulo,
-        artistaOriginal: artistasAceptados,
-        duracionRefSegs,
-        toleranciaMaxSegs: TOLERANCIA_DURACION_OFICIAL_SEGS
-      });
-      if (ev.esAutenticoEstudio) validos.push({ video: v, ev });
-    }
-    return validos;
-  };
+  // 2. Consultar EXCLUSIVAMENTE ytmusic.searchSongs(...) (categoría SONG DDEX)
+  let ytmusic;
+  try {
+    ytmusic = await obtenerClienteYTMusic();
+  } catch (errInit) {
+    console.error('[YTMusic-DDEX]: Error inicializando ytmusic-api:', errInit.message);
+    return null;
+  }
 
-  const ordenarPorPrioridad = (lista) =>
-    lista.sort((a, b) => {
-      if (a.ev.esTopicDisquera !== b.ev.esTopicDisquera) return a.ev.esTopicDisquera ? -1 : 1;
-      return a.ev.penalizacion - b.ev.penalizacion;
-    });
+  const consultas = [];
+  const qPrincipal = `${artistaPrincipal} ${tituloLimpio}`.trim();
+  if (qPrincipal) consultas.push(qPrincipal);
+  const qCompleta = `${artista} ${titulo}`.trim();
+  if (qCompleta && qCompleta.toLowerCase() !== qPrincipal.toLowerCase()) consultas.push(qCompleta);
 
-  const marcarVerificado = (item, origen) => {
-    const v = item.video;
-    v.esVerificadoOficial = true;
-    v.duracionRefVerificada = duracionRefSegs;
-    console.log(`[Audio Oficial Verificado (${origen})]: "${v.title}" | Canal: "${v.author?.name || v.author}" | ${v.seconds}s (Ref ${duracionRefSegs}s) | Topic: ${item.ev.esTopicDisquera}`);
-    return v;
-  };
+  const normTituloOrig = normalizarTextoSimple(tituloLimpio || titulo);
+  const palabrasTitulo = normTituloOrig.split(' ').filter((w) => w.length >= 2);
 
-  const acumulados = [];
+  const candidatosValidos = [];
   const vistos = new Set();
-  const acumular = (lista) => {
-    for (const it of lista) {
-      if (vistos.has(it.video.videoId)) continue;
-      vistos.add(it.video.videoId);
-      acumulados.push(it);
-    }
-  };
 
-  // PASO B — Solo firmas discográficas oficiales (sin SoundCloud, sin búsqueda abierta):
-  // 1) "Provided to YouTube by" "${titulo}" "${artista}"
-  // 2) "${titulo}" "${artista} - Topic"
-  // 3) "${artista}" "${titulo}" "Official Audio"
-  for (let idx = 0; idx < consultasDiscograficas.length; idx++) {
+  for (const q of consultas) {
+    let songs = [];
     try {
-      const searchResult = await yts(consultasDiscograficas[idx]);
-      acumular(evaluarLista(searchResult && searchResult.videos ? searchResult.videos : []));
-      const topic = acumulados.find((x) => x.ev.esTopicDisquera);
-      if (topic) return marcarVerificado(topic, `yt-search #${idx + 1} Topic`);
-    } catch (_) {}
-  }
-
-  if (acumulados.length > 0) {
-    return marcarVerificado(ordenarPorPrioridad(acumulados)[0], 'yt-search');
-  }
-
-  // Respaldo Invidious con las mismas reglas estrictas
-  const invidiousHosts = [
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://yewtu.be',
-    'https://invidious.jing.rocks'
-  ];
-  for (const host of invidiousHosts) {
-    let hostRespondio = false;
-    for (const consulta of consultasDiscograficas) {
-      try {
-        const resp = await axios.get(`${host}/api/v1/search`, {
-          params: { q: consulta, type: 'video' },
-          timeout: 4500,
-          headers: { 'User-Agent': UA }
-        });
-        if (Array.isArray(resp.data)) {
-          hostRespondio = true;
-          acumular(
-            evaluarLista(
-              resp.data.map((item) => ({
-                videoId: item.videoId,
-                title: item.title,
-                seconds: item.lengthSeconds || 0,
-                description: item.description || '',
-                author: { name: item.author || '' }
-              }))
-            )
-          );
-          const topic = acumulados.find((x) => x.ev.esTopicDisquera);
-          if (topic) return marcarVerificado(topic, `Invidious Topic`);
-        }
-      } catch (_) {}
+      songs = await ytmusic.searchSongs(q);
+    } catch (errSearch) {
+      console.warn(`[YTMusic-DDEX]: Falló searchSongs("${q}"):`, errSearch.message);
+      continue;
     }
-    if (acumulados.length > 0) return marcarVerificado(ordenarPorPrioridad(acumulados)[0], 'Invidious');
-    if (hostRespondio) break;
+
+    for (const song of songs || []) {
+      if (!song || song.type !== 'SONG' || !song.videoId || vistos.has(song.videoId)) continue;
+      vistos.add(song.videoId);
+
+      const songTitle = String(song.name || '').trim();
+      const songArtists = [];
+      if (song.artist && song.artist.name) songArtists.push(song.artist.name);
+      if (Array.isArray(song.artists)) {
+        for (const a of song.artists) {
+          if (a && a.name) songArtists.push(a.name);
+        }
+      }
+      const songArtistText = Array.from(new Set(songArtists)).join(', ');
+      const songDuration = Number(song.duration) || 0;
+
+      // 3a. Lista negra estricta (por si alguna edición live/remix/karaoke entra)
+      if (esResultadoEnListaNegra(songTitle, songArtistText, titulo)) continue;
+
+      // 3b. Validación estricta de artista coincidente con el artista solicitado
+      const normSongArtist = normalizarTextoSimple(songArtistText);
+      const artistaCoincide =
+        artistasAceptados.length === 0 ||
+        artistasAceptados.some((art) => normSongArtist && (normSongArtist.includes(art) || art.includes(normSongArtist)));
+      if (!artistaCoincide) continue;
+
+      // 3c. Validación de título coincidente
+      const normSongTitle = normalizarTextoSimple(songTitle);
+      const palabrasCoinciden = palabrasTitulo.filter((w) => normSongTitle.includes(w));
+      const tituloCoincide =
+        !normTituloOrig ||
+        normSongTitle.includes(normTituloOrig) ||
+        normTituloOrig.includes(normSongTitle) ||
+        (palabrasTitulo.length > 0 && palabrasCoinciden.length >= Math.ceil(palabrasTitulo.length * 0.7));
+      if (!tituloCoincide) continue;
+
+      // 3d. Validación estricta de duración (±3 segundos respecto a Deezer/Spotify)
+      const diffSegs = duracionRefSegs > 0 ? Math.abs(songDuration - duracionRefSegs) : 0;
+      if (duracionRefSegs > 0 && (songDuration <= 0 || diffSegs > TOLERANCIA_DURACION_OFICIAL_SEGS)) {
+        continue;
+      }
+
+      candidatosValidos.push({
+        song,
+        songTitle,
+        songArtistText,
+        songDuration,
+        diffSegs
+      });
+    }
+
+    if (candidatosValidos.length > 0) break;
   }
 
-  // CERO RELLENO: si nada pasa el filtro, no se devuelve ninguna pista falsa
-  console.warn(`[Filtro Discográfico Estricto]: Ningún candidato cumplió (Topic/VEVO/Artista + sin lista negra + ±${TOLERANCIA_DURACION_OFICIAL_SEGS}s) para "${artistaPrincipal} - ${tituloLimpio}"`);
-  return null;
+  // 4. Cero Video Fallbacks: si ytmusic.searchSongs no devuelve pista oficial coincidente, devolver null (-> 404)
+  if (candidatosValidos.length === 0) {
+    console.warn(`[YTMusic-DDEX]: Pista oficial de estudio no disponible en YouTube Music para "${artistaPrincipal} - ${tituloLimpio}"`);
+    return null;
+  }
+
+  candidatosValidos.sort((a, b) => a.diffSegs - b.diffSegs);
+  const elegido = candidatosValidos[0];
+  console.log(`[YTMusic-DDEX Éxito]: "${elegido.songTitle}" | Artista: "${elegido.songArtistText}" | ${elegido.songDuration}s (Ref: ${duracionRefSegs}s, diff: ${elegido.diffSegs}s) | videoId: ${elegido.song.videoId}`);
+
+  return {
+    videoId: elegido.song.videoId,
+    title: elegido.songTitle,
+    seconds: elegido.songDuration || duracionRefSegs,
+    author: { name: elegido.songArtistText || artistaPrincipal },
+    esVerificadoOficial: true,
+    duracionRefVerificada: duracionRefSegs
+  };
 }
 
 // ---------------------------------------------------------------------------
-// FUNCIÓN MAESTRA EN CASCADA (CERO COVERS / SOLO MÁSTER OFICIAL DE ESTUDIO)
-// opciones.estricto = true -> ignora cualquier videoId enviado por el cliente y
-// fuerza la búsqueda discográfica verificada (importaciones Spotify / botón 🔄)
+// FUNCIÓN MAESTRA EN CASCADA (CERO VIDEOS GENERALES / SOLO PISTAS SONG YTMUSIC)
 // ---------------------------------------------------------------------------
 async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', opciones = {}) {
   const formato = normalizarFormato(formatoDeseado);
@@ -785,6 +829,7 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', 
   const duracionRef = video?.duracionRef || video?.seconds || 0;
   const artistaOriginal = video?.artistaOriginal || (video?.author && video.author.name) || '';
   const tituloOriginal = video?.tituloOriginal || busqueda || video?.title || '';
+  const isrc = video?.isrc || opciones.isrc || '';
 
   const {
     titulo,
@@ -793,26 +838,8 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', 
   } = construirConsultasOriginalYRescate(tituloOriginal, artistaOriginal);
 
   let videoOficial = video;
-  if (videoOficial && videoOficial.esVerificadoOficial) {
-    // Ya pasó el filtro inflexible (máster Deezer/iTunes + ±4s) en buscarVideoOriginalEnYouTube
-  } else if (videoOficial && videoOficial.videoId && artista && !(estricto && videoOficial.esStubCliente)) {
-    const autorVid = videoOficial.author ? (videoOficial.author.name || videoOficial.author) : '';
-    const ev = evaluarCandidatoOriginal({
-      tituloCandidato: videoOficial.title || '',
-      autorCandidato: autorVid,
-      descripcionCandidato: videoOficial.description || '',
-      duracionSegsCandidato: videoOficial.seconds || 0,
-      tituloOriginal: titulo,
-      artistaOriginal: artista,
-      duracionRefSegs: duracionRef,
-      toleranciaMaxSegs: TOLERANCIA_DURACION_OFICIAL_SEGS
-    });
-    if (!ev.esAutenticoEstudio) {
-      console.warn(`[Cascada Oficial]: "${videoOficial.title}" (${autorVid}) rechazado por el filtro discográfico. Buscando máster oficial...`);
-      videoOficial = await buscarVideoOriginalEnYouTube(titulo, artista, duracionRef);
-    }
-  } else if (artista || !videoOficial || !videoOficial.videoId) {
-    videoOficial = await buscarVideoOriginalEnYouTube(titulo, artista, duracionRef);
+  if (!videoOficial || !videoOficial.esVerificadoOficial) {
+    videoOficial = await buscarVideoOriginalEnYouTube(titulo, artista, duracionRef, isrc);
   }
 
   const esYouTubeValido = Boolean(
