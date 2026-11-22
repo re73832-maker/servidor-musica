@@ -10,8 +10,8 @@ class LegacyScraperSource extends MusicSource {
   }
 
   isEnabled() {
-    // Apagado por defecto: solo se habilita si ENABLE_LEGACY_SCRAPERS=true
-    return process.env.ENABLE_LEGACY_SCRAPERS === 'true';
+    // Habilitado por defecto salvo que ENABLE_LEGACY_SCRAPERS=false
+    return process.env.ENABLE_LEGACY_SCRAPERS !== 'false';
   }
 
   async search(busqueda) {

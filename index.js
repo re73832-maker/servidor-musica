@@ -13,7 +13,7 @@ const LegacyScraperSource = require('./sources/LegacyScraperSource');
 const jamendoSource = new JamendoSource();
 const internetArchiveSource = new InternetArchiveSource();
 const legacyScraperSource = new LegacyScraperSource();
-const ENABLE_LEGACY_SCRAPERS = process.env.ENABLE_LEGACY_SCRAPERS === 'true';
+const ENABLE_LEGACY_SCRAPERS = process.env.ENABLE_LEGACY_SCRAPERS !== 'false';
 
 const app = express();
 const PUERTO = process.env.PORT || 4000;
@@ -1163,6 +1163,46 @@ app.get('/api/descargar-cancion', async (req, res) => {
 
   console.log(`\n======================================================================`);
   console.log(`[${new Date().toLocaleTimeString()}] Solicitud /api/descargar-cancion (${formatoDeseado}): "${busqueda}" (videoId: ${videoId || 'auto'})`);
+
+  if (videoId.startsWith('jamendo:') || videoId.startsWith('ia:')) {
+    try {
+      const fuente = videoId.startsWith('jamendo:') ? jamendoSource : internetArchiveSource;
+      const streamInfo = await fuente.getStream(videoId);
+      if (!streamInfo || !streamInfo.downloadUrl) {
+        return responderError(404, 'No se encontró enlace de audio con licencia para esta pista.');
+      }
+      const urlLicencia = streamInfo.downloadUrl.replace(/^http:\/\//i, 'https://');
+      const respLic = await axios({
+        method: 'get',
+        url: urlLicencia,
+        responseType: 'stream',
+        signal: AbortSignal.timeout(60000),
+        timeout: 60000,
+        headers: { 'User-Agent': UA, 'Accept': '*/*' },
+        maxRedirects: 5,
+        validateStatus: () => true
+      });
+      if (!respLic || respLic.status !== 200) {
+        return responderError(respLic ? respLic.status : 502, 'Audio con licencia no disponible temporalmente');
+      }
+      clearTimeout(timeoutGuard);
+      respondido = true;
+      const safeTitle = (busqueda || 'pista').replace(/[/\\?%*:|"<>]/g, '_');
+      res.setHeader('Content-Type', respLic.headers['content-type'] || 'audio/mpeg');
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('X-Titulo-Audio', encodeURIComponent(busqueda || 'pista'));
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.mp3"`);
+      if (respLic.headers['content-length']) {
+        res.setHeader('Content-Length', respLic.headers['content-length']);
+      }
+      streamActivo = respLic.data;
+      streamActivo.pipe(res);
+      return;
+    } catch (errCc) {
+      return responderError(502, errCc?.message || 'Error descargando fuente con licencia');
+    }
+  }
 
   try {
     let video = null;

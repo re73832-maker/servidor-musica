@@ -14,3 +14,5 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: ENABLE_LEGACY_SCRAPERS
+        value: "true"

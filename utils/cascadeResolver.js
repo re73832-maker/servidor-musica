@@ -562,9 +562,14 @@ async function resolverNativoYtdl(videoUrl) {
 
     if (mejorFormato && mejorFormato.url) {
       const bitrate = mejorFormato.audioBitrate || 128;
+      let finalUrl = mejorFormato.url;
+      const clen = Number(mejorFormato.contentLength);
+      if (clen > 0 && !finalUrl.includes('range=')) {
+        finalUrl += (finalUrl.includes('?') ? '&' : '?') + `range=0-${clen - 1}`;
+      }
       console.log(`[Nivel 2 Éxito]: Stream nativo resuelto (${bitrate} kbps)`);
       return {
-        url: mejorFormato.url,
+        url: finalUrl,
         calidad: `${bitrate}k`,
         nivel: 2,
         proveedor: 'ytdl-native-stream'
@@ -741,6 +746,7 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
   const palabrasTitulo = normTituloOrig.split(' ').filter((w) => w.length >= 2);
 
   const candidatosValidos = [];
+  const candidatosRelajados = [];
   const vistos = new Set();
 
   if (ytmusic) {
@@ -790,9 +796,18 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
           (palabrasTitulo.length > 0 && palabrasCoinciden.length >= Math.ceil(palabrasTitulo.length * 0.7));
         if (!tituloCoincide) continue;
 
-        // Tolerancia estricta ±2 segundos respecto a duracionMasterSeg
+        // Tolerancia estricta ±2 segundos respecto a duracionMasterSeg; guardar respaldo hasta ±20s
         const diffSegs = duracionRefSegs > 0 ? Math.abs(songDuration - duracionRefSegs) : 0;
         if (duracionRefSegs > 0 && (songDuration <= 0 || diffSegs > TOLERANCIA_DURACION_OFICIAL_SEGS)) {
+          if (songDuration > 0 && diffSegs <= 20) {
+            candidatosRelajados.push({
+              song,
+              songTitle,
+              songArtistText,
+              songDuration,
+              diffSegs
+            });
+          }
           continue;
         }
 
@@ -865,14 +880,16 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
     }
   }
 
-  // 4. Cero Relleno: si ningún resultado cumple estas condiciones exactas, devolver null (-> 404)
-  if (candidatosValidos.length === 0) {
+  const listaFinal = candidatosValidos.length > 0 ? candidatosValidos : candidatosRelajados;
+
+  // 4. Cero Relleno: si ningún resultado cumple estas condiciones, devolver null (-> 404)
+  if (listaFinal.length === 0) {
     console.warn(`[Studio-Pure]: Pista oficial de estudio no disponible para "${artistaPrincipal} - ${tituloLimpio}"`);
     return null;
   }
 
-  candidatosValidos.sort((a, b) => a.diffSegs - b.diffSegs);
-  const elegido = candidatosValidos[0];
+  listaFinal.sort((a, b) => a.diffSegs - b.diffSegs);
+  const elegido = listaFinal[0];
   console.log(`[YTMusic-DDEX Éxito]: "${elegido.songTitle}" | Artista: "${elegido.songArtistText}" | ${elegido.songDuration}s (Ref: ${duracionRefSegs}s, diff: ${elegido.diffSegs}s) | videoId: ${elegido.song.videoId}`);
 
   return {
@@ -902,8 +919,15 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', 
     consultaOriginal
   } = construirConsultasOriginalYRescate(tituloOriginal, artistaOriginal);
 
+  const tieneVideoIdDirecto = Boolean(
+    video &&
+    video.videoId &&
+    video.videoId.length === 11 &&
+    !video.videoId.startsWith('itunes_')
+  );
+
   let videoOficial = video;
-  if (!videoOficial || !videoOficial.esVerificadoOficial) {
+  if (!videoOficial || (!videoOficial.esVerificadoOficial && (estricto || !tieneVideoIdDirecto))) {
     videoOficial = await buscarVideoOriginalEnYouTube(titulo, artista, duracionRef, isrc);
   }
 
