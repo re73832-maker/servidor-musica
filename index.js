@@ -90,8 +90,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v5.1.0 Fix-Btn 🚀',
-    cacheVersion: 'app-musica-v5.1.0',
+    version: 'v5.2.0',
+    cacheVersion: 'app-musica-v5.2.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
