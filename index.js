@@ -5,6 +5,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
+const { buscarGrabacionesMusicBrainz } = require('./utils/musicBrainzService');
 
 const app = express();
 const PUERTO = process.env.PORT || 4000;
@@ -1431,6 +1432,28 @@ app.use((req, res, next) => {
     res.setHeader('Surrogate-Control', 'no-store');
   }
   next();
+});
+
+// Validación de metadatos y duraciones candidatas con MusicBrainz (1 req/s + caché)
+app.get('/api/musicbrainz/validate', async (req, res) => {
+  const title = String(req.query.title || '').trim();
+  const artist = String(req.query.artist || '').trim();
+
+  if (!title) {
+    return res.status(400).json({ ok: false, error: 'Parámetro title requerido' });
+  }
+
+  try {
+    const resultado = await buscarGrabacionesMusicBrainz(title, artist);
+    return res.status(200).json(resultado);
+  } catch (err) {
+    const status = err?.response?.status || 503;
+    return res.status(status >= 400 && status < 600 ? status : 503).json({
+      ok: false,
+      error: 'No se pudo consultar MusicBrainz en este momento',
+      detail: err?.message || String(err)
+    });
+  }
 });
 
 // Servir estáticos de la PWA compilada
