@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.6.0 Studio-Pure 🚀',
-    cacheVersion: 'app-musica-v4.6.0',
+    version: 'v5.1.0 Fix-Btn 🚀',
+    cacheVersion: 'app-musica-v5.1.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -500,6 +500,7 @@ const {
   ensamblarHlsSoundCloudABuffer,
   normalizarFormato: normalizarFormatoCascada,
   buscarVideoOriginalEnYouTube,
+  buscarCandidatosOficiales,
   construirConsultasOriginalYRescate
 } = require('./utils/cascadeResolver');
 
@@ -773,6 +774,46 @@ app.get('/api/obtener-enlace', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// ENDPOINT: POST /api/buscar-candidatos-oficiales
+// Devuelve hasta 4 candidatos reales (YouTube Music + YouTube - Topic) para vista previa
+// ---------------------------------------------------------------------------
+app.options('/api/buscar-candidatos-oficiales', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  return res.sendStatus(204);
+});
+
+app.post('/api/buscar-candidatos-oficiales', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  const limpiar = (txt) =>
+    String(txt || '').replace(/_\d{6,}/g, ' ').replace(/\b\d{10,}\b/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const titulo = limpiar(req.body?.titulo || '');
+  const artista = limpiar(req.body?.artista || '');
+  const duracionSegundos = parseInt(req.body?.duracionSegundos) || 0;
+
+  if (!titulo) {
+    return res.status(400).json({ error: true, mensaje: 'Debes enviar titulo' });
+  }
+
+  try {
+    const candidatos = await buscarCandidatosOficiales(titulo, artista, duracionSegundos);
+    return res.json({
+      ok: true,
+      total: candidatos.length,
+      candidatos
+    });
+  } catch (err) {
+    console.error('[Error /api/buscar-candidatos-oficiales]:', err.message || err);
+    return res.status(500).json({ error: true, mensaje: 'Error al buscar candidatos oficiales' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // ENDPOINT: POST /api/resolver-oficial
 // Reemplazo Hi-Fi exclusivo para el botón 🔄 y descargas oficiales forzadas
 // ---------------------------------------------------------------------------
@@ -789,13 +830,17 @@ app.post('/api/resolver-oficial', async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, X-Titulo-Audio, X-Calidad-Audio');
 
-  const titulo = String(req.body?.titulo || '').trim();
-  const artista = String(req.body?.artista || '').trim();
+  const limpiar = (txt) =>
+    String(txt || '').replace(/_\d{6,}/g, ' ').replace(/\b\d{10,}\b/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const titulo = limpiar(req.body?.titulo || '');
+  const artista = limpiar(req.body?.artista || '');
   const isrc = String(req.body?.isrc || '').trim();
+  const videoIdSolicitado = String(req.body?.videoId || '').trim();
   const duracionSegundos = parseInt(req.body?.duracionSegundos) || 0;
 
-  if (!titulo) {
-    return res.status(400).json({ error: true, mensaje: 'Debes enviar titulo' });
+  if (!titulo && !videoIdSolicitado) {
+    return res.status(400).json({ error: true, mensaje: 'Debes enviar titulo o videoId' });
   }
 
   let respondido = false;
@@ -814,8 +859,21 @@ app.post('/api/resolver-oficial', async (req, res) => {
   });
 
   try {
-    console.log(`\n[POST /api/resolver-oficial]: "${artista ? `${artista} - ` : ''}${titulo}" (durRef: ${duracionSegundos}s${isrc ? `, ISRC: ${isrc}` : ''})`);
-    const video = await buscarVideoEnYouTube(titulo, artista, duracionSegundos, isrc);
+    console.log(`\n[POST /api/resolver-oficial]: "${artista ? `${artista} - ` : ''}${titulo}" (videoId: ${videoIdSolicitado || 'auto'}, durRef: ${duracionSegundos}s${isrc ? `, ISRC: ${isrc}` : ''})`);
+    let video = null;
+    if (videoIdSolicitado && !videoIdSolicitado.startsWith('itunes_') && videoIdSolicitado.length === 11) {
+      video = {
+        videoId: videoIdSolicitado,
+        title: titulo,
+        seconds: duracionSegundos,
+        duracionRef: duracionSegundos,
+        author: { name: artista },
+        esVerificadoOficial: true
+      };
+    } else {
+      video = await buscarVideoEnYouTube(titulo, artista, duracionSegundos, isrc);
+    }
+
     if (!video) {
       clearTimeout(timeoutGuard);
       return res.status(404).json({ error: true, mensaje: 'Pista oficial de estudio no disponible' });
@@ -898,16 +956,35 @@ app.get('/api/proxy-stream', async (req, res) => {
 
   let audioUrl = (req.query.url || '').trim();
   const videoId = (req.query.videoId || '').trim();
-  const busqueda = (req.query.q || '').trim();
+  const busqueda = (req.query.q || req.query.titulo || '').trim();
+  const artistaParam = (req.query.artist || req.query.artista || '').trim();
 
   // Si no se proporciona URL directa pero sí videoId o q, resolver la pista completa
   if (!audioUrl && (videoId || busqueda)) {
     try {
       let video = null;
       if (videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
-        video = { videoId, title: busqueda, seconds: parseInt(req.query.seconds) || 0 };
-      } else if (busqueda) {
-        video = await buscarVideoEnYouTube(busqueda);
+        video = {
+          videoId,
+          title: busqueda,
+          seconds: parseInt(req.query.seconds) || 0,
+          author: { name: artistaParam },
+          esVerificadoOficial: true
+        };
+      } else if (busqueda || artistaParam) {
+        video = await buscarVideoEnYouTube(busqueda, artistaParam, parseInt(req.query.seconds) || 0);
+        if (!video) {
+          const cands = await buscarCandidatosOficiales(busqueda, artistaParam, parseInt(req.query.seconds) || 0);
+          if (cands && cands[0]) {
+            video = {
+              videoId: cands[0].videoId,
+              title: cands[0].titulo,
+              seconds: cands[0].duracionSeg,
+              author: { name: cands[0].canal },
+              esVerificadoOficial: true
+            };
+          }
+        }
       }
 
       if (video) {

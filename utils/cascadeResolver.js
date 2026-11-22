@@ -956,12 +956,106 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', 
   return null;
 }
 
+/**
+ * Busca hasta 4 candidatos reales en YouTube Music (ytmusic-api) y YouTube (yt-search)
+ * limpiando sufijos numéricos (_174232...) y priorizando canales - Topic / Provided to YouTube by / artista oficial.
+ */
+async function buscarCandidatosOficiales(tituloRaw = '', artistaRaw = '', duracionSegundos = 0) {
+  const limpiarSufijoNumerico = (txt = '') =>
+    String(txt || '')
+      .replace(/_\d{6,}/g, ' ')
+      .replace(/\b\d{10,}\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const tituloBase = limpiarSufijoNumerico(tituloRaw);
+  const artistaBase = limpiarSufijoNumerico(artistaRaw);
+  const { titulo, tituloLimpio, artista, artistaPrincipal } = construirConsultasOriginalYRescate(tituloBase, artistaBase);
+
+  const qBusqueda = `${artistaPrincipal || artista} ${tituloLimpio || titulo}`.trim() || tituloBase;
+  const candidatos = [];
+  const vistos = new Set();
+
+  const agregarCandidato = ({ videoId, tituloCand, canal, duracionSeg, esTopicOOficial, prioridad }) => {
+    if (!videoId || videoId.length !== 11 || vistos.has(videoId)) return;
+    if (duracionSeg > 0 && (duracionSeg < 45 || duracionSeg > 720)) return;
+    vistos.add(videoId);
+    const diff = duracionSegundos > 0 && duracionSeg > 0 ? Math.abs(duracionSeg - duracionSegundos) : 0;
+    candidatos.push({
+      videoId,
+      titulo: String(tituloCand || tituloLimpio || tituloBase).trim(),
+      canal: String(canal || 'YouTube Music').trim(),
+      duracionSeg: Number(duracionSeg) || 0,
+      esOficial: Boolean(esTopicOOficial),
+      _score: (esTopicOOficial ? 0 : 1000) + prioridad * 50 + diff
+    });
+  };
+
+  // 1) YouTube Music (ytmusic-api categoría SONG DDEX)
+  try {
+    const ytmusic = await obtenerClienteYTMusic();
+    const songs = await ytmusic.searchSongs(qBusqueda);
+    for (const s of (songs || []).slice(0, 6)) {
+      if (!s || !s.videoId) continue;
+      const artNames = [];
+      if (s.artist && s.artist.name) artNames.push(s.artist.name);
+      if (Array.isArray(s.artists)) {
+        for (const a of s.artists) if (a && a.name) artNames.push(a.name);
+      }
+      const canal = artNames.length ? `${Array.from(new Set(artNames)).join(', ')} - Topic` : 'YouTube Music - Topic';
+      agregarCandidato({
+        videoId: s.videoId,
+        tituloCand: s.name,
+        canal,
+        duracionSeg: Number(s.duration) || 0,
+        esTopicOOficial: true,
+        prioridad: 0
+      });
+    }
+  } catch (eYtm) {
+    console.warn('[buscarCandidatosOficiales ytmusic]:', eYtm.message);
+  }
+
+  // 2) YouTube (yt-search) priorizando canales - Topic / Provided to YouTube by / artista oficial
+  const consultasYt = [
+    `"${tituloLimpio || tituloBase}" "${artistaPrincipal || artistaBase} - Topic"`,
+    `${artistaPrincipal || artistaBase} ${tituloLimpio || tituloBase} Official Audio`.trim()
+  ];
+  for (let idx = 0; idx < consultasYt.length; idx++) {
+    try {
+      const r = await yts(consultasYt[idx]);
+      for (const v of (r && r.videos ? r.videos : []).slice(0, 8)) {
+        if (!v || !v.videoId) continue;
+        const canal = String((v.author && v.author.name) || v.author || '').trim();
+        const desc = String(v.description || '');
+        const esTopic = canal.endsWith(' - Topic') || desc.includes('Provided to YouTube by');
+        const esArtistaOficial =
+          esTopic ||
+          /vevo/i.test(canal) ||
+          (artistaPrincipal && normalizarTextoSimple(canal).includes(normalizarTextoSimple(artistaPrincipal)));
+        agregarCandidato({
+          videoId: v.videoId,
+          tituloCand: v.title,
+          canal,
+          duracionSeg: Number(v.seconds) || 0,
+          esTopicOOficial: esArtistaOficial,
+          prioridad: esTopic ? 1 : idx + 2
+        });
+      }
+    } catch (_) {}
+  }
+
+  candidatos.sort((a, b) => a._score - b._score);
+  return candidatos.slice(0, 4).map(({ _score, ...rest }) => rest);
+}
+
 module.exports = {
   resolverAudioConCascada,
   ensamblarHlsSoundCloudABuffer,
   normalizarFormato,
   getTimeoutSignal,
   buscarVideoOriginalEnYouTube,
+  buscarCandidatosOficiales,
   construirConsultasOriginalYRescate,
   limpiarTituloParaRescate,
   evaluarCandidatoOriginal,
