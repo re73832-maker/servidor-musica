@@ -1,1 +1,145 @@
-if(!self.define){let e,s={};const n=(n,a)=>(n=new URL(n+".js",a).href,s[n]||new Promise(s=>{if("document"in self){const e=document.createElement("script");e.src=n,e.onload=s,document.head.appendChild(e)}else e=n,importScripts(n),s()}).then(()=>{let e=s[n];if(!e)throw new Error(`Module ${n} didn’t register its module`);return e}));self.define=(a,i)=>{const c=e||("document"in self?document.currentScript.src:"")||location.href;if(s[c])return;let r={};const t=e=>n(e,c),o={module:{uri:c},exports:r,require:t};s[c]=Promise.all(a.map(e=>o[e]||t(e))).then(e=>(i(...e),r))}}define(["./workbox-b6ef9ad5"],function(e){"use strict";self.skipWaiting(),e.clientsClaim(),e.precacheAndRoute([{url:"pwa-512x512.png",revision:"cdc152df64ca61b74df3890a694b2a6c"},{url:"pwa-192x192.png",revision:"b267fdfab0c408fafd36b79d1e808b2e"},{url:"manifest.webmanifest",revision:"0f663ae6ff57554b2cbe07daa16e86db"},{url:"manifest.json",revision:"017761a895411cadba63ee644c0f9c05"},{url:"index.html",revision:"49538708ae98cd5ca248e11b7006c06a"},{url:"icons.svg",revision:"3b4fcfcf393eca4d264dca4a4663bc37"},{url:"icon-512.png",revision:"cdc152df64ca61b74df3890a694b2a6c"},{url:"icon-192.png",revision:"b267fdfab0c408fafd36b79d1e808b2e"},{url:"favicon.svg",revision:"7e840862161341271697daa99a40d76b"},{url:"espectro-vecteezy.png",revision:"655a60df4ec7224f1aa0455f81d19cc8"},{url:"espectro-vecteezy-transparente.png",revision:"5597f8bc082d287184eacb5a8bdd15b1"},{url:"espectro-vecteezy-cuadrado.png",revision:"28a004e624b00d8777ddf39f693ee968"},{url:"assets/storage-vendor-CKNv2BUB.js",revision:null},{url:"assets/rolldown-runtime-W7wSyTde.js",revision:null},{url:"assets/react-vendor-BPUCzseJ.js",revision:null},{url:"assets/index-DPEvq3g-.css",revision:null},{url:"assets/index-BNAaXzGI.js",revision:null},{url:"pwa-192x192.png",revision:"b267fdfab0c408fafd36b79d1e808b2e"},{url:"pwa-512x512.png",revision:"cdc152df64ca61b74df3890a694b2a6c"},{url:"manifest.webmanifest",revision:"0f663ae6ff57554b2cbe07daa16e86db"}],{}),e.cleanupOutdatedCaches(),e.registerRoute(new e.NavigationRoute(e.createHandlerBoundToURL("/index.html"),{denylist:[/^\/api/]})),e.registerRoute(({request:e})=>"navigate"===e.mode,new e.NetworkFirst({cacheName:"app-navigation-cache",networkTimeoutSeconds:2.5,plugins:[new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET"),e.registerRoute(({request:e})=>"style"===e.destination||"script"===e.destination||"worker"===e.destination,new e.NetworkFirst({cacheName:"app-static-assets",networkTimeoutSeconds:2.5,plugins:[new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET"),e.registerRoute(({request:e})=>"image"===e.destination||"font"===e.destination,new e.CacheFirst({cacheName:"app-media-cache",plugins:[new e.ExpirationPlugin({maxEntries:150,maxAgeSeconds:2592e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET"),e.registerRoute(({url:e})=>e.pathname.match(/\.(png|jpg|jpeg|svg|webp|gif)$/i)||e.hostname.includes("scdn.co")||e.hostname.includes("mzstatic.com")||e.hostname.includes("googleusercontent.com")||e.hostname.includes("ytimg.com"),new e.CacheFirst({cacheName:"app-external-covers-cache",plugins:[new e.ExpirationPlugin({maxEntries:300,maxAgeSeconds:2592e3}),new e.CacheableResponsePlugin({statuses:[0,200]})]}),"GET")});
+const CACHE_NAME = 'app-musica-v4.1.1';
+const MEDIA_CACHE_NAME = 'app-musica-media-v4.1.1';
+const ASSETS_TO_CACHE = [
+  '/',
+  '/index.html',
+  '/manifest.json',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/pwa-192x192.png',
+  '/pwa-512x512.png'
+];
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
+self.addEventListener('install', (event) => {
+  self.skipWaiting();
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(ASSETS_TO_CACHE);
+    })
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames
+          .filter((name) => name !== CACHE_NAME && name !== MEDIA_CACHE_NAME)
+          .map((name) => caches.delete(name))
+      );
+    }).then(() => self.clients.claim())
+  );
+});
+
+// Helper NetworkFirst con timeout máximo de 2.5 segundos y fallback inmediato a CacheFirst
+function fetchWithTimeoutAndCache(request, cacheName, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      caches.match(request).then((cached) => {
+        if (!settled && cached) {
+          settled = true;
+          resolve(cached);
+        }
+      });
+    }, timeoutMs);
+
+    fetch(request)
+      .then((networkResponse) => {
+        clearTimeout(timer);
+        if (networkResponse && (networkResponse.status === 200 || networkResponse.status === 0)) {
+          const respClone = networkResponse.clone();
+          caches.open(cacheName).then((cache) => cache.put(request, respClone)).catch(() => {});
+          if (!settled) {
+            settled = true;
+            resolve(networkResponse);
+          }
+          return;
+        }
+        throw new Error('Bad network response');
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        caches.match(request).then((cached) => {
+          if (cached) {
+            resolve(cached);
+          } else if (request.mode === 'navigate') {
+            caches.match('/index.html').then((idx) => resolve(idx || caches.match('/')));
+          } else {
+            resolve(new Response('', { status: 504, statusText: 'Offline' }));
+          }
+        });
+      });
+  });
+}
+
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET' || !event.request.url.startsWith('http')) {
+    return;
+  }
+
+  // Las llamadas a la API y descargas van directas a la red
+  if (
+    event.request.url.includes('/api/') ||
+    event.request.url.includes('/descargar') ||
+    event.request.url.includes('/stream') ||
+    event.request.url.includes('/health')
+  ) {
+    return;
+  }
+
+  const dest = event.request.destination;
+  const url = new URL(event.request.url);
+
+  // 1. Imágenes, fuentes y carátulas: CacheFirst para carga instantánea sin red
+  if (
+    dest === 'image' ||
+    dest === 'font' ||
+    /\.(png|jpg|jpeg|svg|webp|gif|woff2?|ttf|otf)$/i.test(url.pathname)
+  ) {
+    event.respondWith(
+      caches.match(event.request).then((cachedResponse) => {
+        if (cachedResponse) {
+          return cachedResponse;
+        }
+        return fetch(event.request)
+          .then((networkResponse) => {
+            if (networkResponse && (networkResponse.status === 200 || networkResponse.status === 0)) {
+              const respClone = networkResponse.clone();
+              caches.open(MEDIA_CACHE_NAME).then((cache) => cache.put(event.request, respClone)).catch(() => {});
+            }
+            return networkResponse;
+          })
+          .catch(() => new Response('', { status: 504, statusText: 'Offline' }));
+      })
+    );
+    return;
+  }
+
+  // 2. HTML y bundles JS/CSS: NetworkFirst con timeout máximo de 2.5s y fallback inmediato a caché local
+  if (
+    event.request.mode === 'navigate' ||
+    dest === 'document' ||
+    dest === 'script' ||
+    dest === 'style' ||
+    dest === 'worker' ||
+    /\.(js|css|html|json|webmanifest)$/i.test(url.pathname)
+  ) {
+    event.respondWith(fetchWithTimeoutAndCache(event.request, CACHE_NAME, 2500));
+    return;
+  }
+
+  // 3. Cualquier otro recurso estático: CacheFirst con fallback a red
+  event.respondWith(
+    caches.match(event.request).then((cached) => cached || fetchWithTimeoutAndCache(event.request, CACHE_NAME, 2500))
+  );
+});

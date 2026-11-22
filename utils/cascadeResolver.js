@@ -58,7 +58,15 @@ const PALABRAS_LISTA_NEGRA_ESTRICTA = [
   'tutorial',
   'ai cover',
   'imitacion',
-  'imitación'
+  'imitación',
+  'video oficial',
+  'official video',
+  'music video',
+  'videoclip',
+  'intro',
+  'dj',
+  'mix',
+  'concierto'
 ];
 
 function normalizarTextoSimple(txt = '') {
@@ -228,13 +236,13 @@ function evaluarCandidatoOriginal({
   tituloOriginal = '',
   artistaOriginal = '',
   duracionRefSegs = 0,
-  toleranciaMaxSegs = 10
+  toleranciaMaxSegs = 5
 }) {
   const canalValido = esCanalAutorOficialValido(autorCandidato, artistaOriginal);
   const enListaNegra = esResultadoEnListaNegra(tituloCandidato, autorCandidato, tituloOriginal);
 
   // Validación de Duración Exacta: Si Spotify proporcionó duracionSegundos > 0,
-  // rechaza cualquier resultado cuya duración difiera en más de ±10 segundos.
+  // rechaza cualquier resultado cuya duración difiera en más de ±5 segundos (elimina videoclips con intros hablados o créditos finales).
   const tieneDuracionSpotify = duracionRefSegs > 0;
   const diffSegs =
     tieneDuracionSpotify && duracionSegsCandidato > 0
@@ -272,8 +280,8 @@ function evaluarCandidatoOriginal({
   if (!dentroToleranciaDuracion) penalizacion += 500000 + diffSegs * 5000;
   if (!coincideTitulo) penalizacion += 200000;
 
-  // Premiar grabaciones directas de disquera (" - Topic" / "Provided to YouTube by") sobre videoclips con intro hablada
-  if (esTopicDisquera) penalizacion -= 25000;
+  // Prioridad 1 absoluta a grabaciones directas de distribución discográfica pura (" - Topic" / "Provided to YouTube by")
+  if (esTopicDisquera) penalizacion -= 150000;
   if (esOfficialAudioTitle) penalizacion -= 15000;
   if (esVevoOficial) penalizacion -= 8000;
   if (normAutorCand && artistaOriginal && normAutorCand.includes(normalizarTextoSimple(artistaOriginal.split(',')[0]))) {
@@ -699,10 +707,10 @@ async function probarSoundCloudVerificadoDisquera(tituloOriginal = '', artistaOr
     const titNorm = normalizarTextoSimple(tituloLimpio);
 
     // Filtrar EXCLUSIVAMENTE pistas cuya cuenta/metadato oficial coincida con el artista,
-    // sin ninguna palabra de la lista negra estricta y dentro de ±10 segundos exactos
+    // sin ninguna palabra de la lista negra estricta y dentro de ±5 segundos exactos
     const verificadas = coleccion.filter((p) => {
       const durSegs = Math.round((p.full_duration || 0) / 1000);
-      if (duracionRefSegs > 0 && Math.abs(durSegs - duracionRefSegs) > 10) {
+      if (duracionRefSegs > 0 && Math.abs(durSegs - duracionRefSegs) > 5) {
         return false;
       }
 
@@ -814,7 +822,7 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
   } = construirConsultasOriginalYRescate(tituloRaw, artistaRaw);
 
   // Filtra de inmediato cualquier video que NO cumpla el Filtro de Autor/Canal Obligatorio,
-  // la Lista Negra Estricta y la Validación de Duración Exacta (±10 segundos)
+  // la Lista Negra Estricta y la Validación de Duración Exacta (±5 segundos)
   const filtrarCandidatosEstrictos = (videos = []) => {
     const prefiltrados = (videos || []).filter(
       (item) => item && item.videoId && item.seconds >= 45 && item.seconds <= 720
@@ -833,17 +841,23 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
         tituloOriginal: titulo,
         artistaOriginal: artista || artistaPrincipal,
         duracionRefSegs,
-        toleranciaMaxSegs: 10
+        toleranciaMaxSegs: 5
       });
 
-      // OBLIGATORIO: Solo pasa si canalValido === true, enListaNegra === false, dentroToleranciaDuracion (±10s) === true y coincideTitulo === true
+      // OBLIGATORIO: Solo pasa si canalValido === true, enListaNegra === false, dentroToleranciaDuracion (±5s) === true y coincideTitulo === true
       if (ev.esAutenticoEstudio) {
         validos.push({ video: v, ev });
       }
     }
 
     if (validos.length === 0) return [];
-    validos.sort((a, b) => a.ev.penalizacion - b.ev.penalizacion);
+    // Ordenar dando máxima puntuación (prioridad 1) a pistas de estudio puras (" - Topic" / "Provided to YouTube by")
+    validos.sort((a, b) => {
+      if (a.ev.esTopicDisquera !== b.ev.esTopicDisquera) {
+        return a.ev.esTopicDisquera ? -1 : 1;
+      }
+      return a.ev.penalizacion - b.ev.penalizacion;
+    });
     return validos.map((x) => x.video);
   };
 
@@ -900,7 +914,7 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
   }
 
   // Si ningún resultado pasa el filtro estricto de autenticidad, NO devolver ningún cover de relleno
-  console.warn(`[Filtro Discográfico Estricto]: Ningún video cumplió los requisitos oficiales (Canal Topic/VEVO/Artista, sin covers y ±10s) para "${artista} - ${titulo}"`);
+  console.warn(`[Filtro Discográfico Estricto]: Ningún video cumplió los requisitos oficiales (Canal Topic/VEVO/Artista, sin covers y ±5s) para "${artista} - ${titulo}"`);
   return null;
 }
 
@@ -926,11 +940,12 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3') 
     const ev = evaluarCandidatoOriginal({
       tituloCandidato: videoOficial.title || '',
       autorCandidato: autorVid,
+      descripcionCandidato: videoOficial.description || '',
       duracionSegsCandidato: videoOficial.seconds || 0,
       tituloOriginal: titulo,
       artistaOriginal: artista,
       duracionRefSegs: duracionRef,
-      toleranciaMaxSegs: 10
+      toleranciaMaxSegs: 5
     });
     if (!ev.esAutenticoEstudio) {
       console.warn(`[Cascada Oficial]: El video inicial "${videoOficial.title}" (${autorVid}) fue rechazado por el filtro discográfico. Buscando grabación oficial...`);

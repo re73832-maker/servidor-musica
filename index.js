@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.1.0 Oficial 🚀',
-    cacheVersion: 'app-musica-v4.1.0',
+    version: 'v4.1.1 Oficial 🚀',
+    cacheVersion: 'app-musica-v4.1.1',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
