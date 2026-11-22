@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.1.1 Oficial 🚀',
-    cacheVersion: 'app-musica-v4.1.1',
+    version: 'v4.2.0 Oficial 🚀',
+    cacheVersion: 'app-musica-v4.2.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -493,83 +493,7 @@ async function resolverInvidiousPiped(videoId) {
   return null;
 }
 
-// 3. Fallback SoundCloud CDN con AbortSignal.timeout(10000)
-let scClientId = null;
-let scClientIdFecha = 0;
-
-async function obtenerClientIdSoundCloud(forzar = false) {
-  if (!forzar && scClientId && Date.now() - scClientIdFecha < 6 * 60 * 60 * 1000) return scClientId;
-
-  const html = (await axios.get('https://soundcloud.com/', {
-    headers: { 'User-Agent': UA },
-    signal: AbortSignal.timeout(10000),
-    timeout: 10000
-  })).data;
-  const scripts = [...html.matchAll(/<script crossorigin src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)]
-    .map((m) => m[1])
-    .reverse();
-
-  for (const src of scripts) {
-    try {
-      const js = (await axios.get(src, {
-        headers: { 'User-Agent': UA },
-        signal: AbortSignal.timeout(10000),
-        timeout: 10000
-      })).data;
-      const m = js.match(/client_id\s*:\s*"([a-zA-Z0-9]{32})"/) || js.match(/client_id=([a-zA-Z0-9]{32})/);
-      if (m) {
-        scClientId = m[1];
-        scClientIdFecha = Date.now();
-        return scClientId;
-      }
-    } catch (_) {}
-  }
-  throw new Error('SoundCloud: no se pudo obtener client_id');
-}
-
-async function resolverSoundCloud(busqueda, duracionRef) {
-  try {
-    let clientId = await obtenerClientIdSoundCloud();
-    const r = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
-      params: { q: busqueda, client_id: clientId, limit: 12 },
-      headers: { 'User-Agent': UA },
-      signal: AbortSignal.timeout(10000),
-      timeout: 10000
-    });
-
-    const pistas = (r.data?.collection || [])
-      .filter((p) => p.policy !== 'SNIP' && p.policy !== 'BLOCK')
-      .filter((p) => p.full_duration > 60000)
-      .filter((p) => Math.abs(p.duration - p.full_duration) < 5000);
-
-    if (!pistas.length) return null;
-
-    let seleccionada = pistas[0];
-    if (duracionRef) {
-      const refMs = duracionRef * 1000;
-      pistas.sort((a, b) => Math.abs(a.full_duration - refMs) - Math.abs(b.full_duration - refMs));
-      seleccionada = pistas[0];
-    }
-
-    const trans = seleccionada.media?.transcodings || [];
-    const progresivo = trans.find((t) => t.format?.protocol === 'progressive');
-
-    if (!progresivo) return null;
-
-    const streamInfo = await axios.get(progresivo.url, {
-      params: { client_id: clientId },
-      headers: { 'User-Agent': UA },
-      signal: AbortSignal.timeout(10000),
-      timeout: 10000
-    });
-
-    if (streamInfo.data?.url) {
-      console.log(`[SoundCloud Fallback Éxito]: Resuelta URL directa de audio progresivo`);
-      return streamInfo.data.url;
-    }
-  } catch (_) {}
-  return null;
-}
+// SoundCloud ELIMINADO por completo del flujo (v4.2.0): saturado de covers subidos por usuarios.
 
 const {
   resolverAudioConCascada,
@@ -766,6 +690,8 @@ app.get('/api/obtener-enlace', async (req, res) => {
   const duracionSugerida = parseInt(req.query.seconds) || 0;
   const artistaSugerido = (req.query.artist || '').trim();
   const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
+  // Modo estricto (importaciones de Spotify y botón 🔄): ignora el videoId del cliente y exige máster oficial verificado
+  const modoEstricto = req.query.estricto === '1' || req.query.estricto === 'true' || req.query.origen === 'spotify';
 
   if (!busqueda && !videoId) {
     return finalizar(400, { error: true, mensaje: 'Debes enviar ?q= o ?videoId=' });
@@ -777,7 +703,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
   try {
     let video = null;
 
-    if (videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
+    if (!modoEstricto && videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
       video = {
         videoId: videoId,
         seconds: duracionSugerida,
@@ -785,7 +711,8 @@ app.get('/api/obtener-enlace', async (req, res) => {
         title: busqueda,
         tituloOriginal: busqueda,
         artistaOriginal: artistaSugerido,
-        author: { name: artistaSugerido }
+        author: { name: artistaSugerido },
+        esStubCliente: true
       };
     } else {
       video = await buscarVideoEnYouTube(busqueda, artistaSugerido, duracionSugerida);
@@ -797,7 +724,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
     }
 
     if (!video) {
-      return finalizar(404, { error: true, mensaje: 'Audio oficial no disponible' });
+      return finalizar(404, { error: true, mensaje: 'Audio oficial de estudio no disponible' });
     }
 
     const trackTitle = video.title || busqueda;
@@ -807,13 +734,13 @@ app.get('/api/obtener-enlace', async (req, res) => {
     console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s, ID: ${video.videoId})`);
 
     // 2. Resolver enlace con la cascada oficial de estudio (Prohibido covers de relleno)
-    const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
+    const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado, { estricto: modoEstricto });
 
     if (!resultadoAudio || !resultadoAudio.url) {
       console.warn(`[Aviso Cascada Oficial]: Audio oficial no disponible para "${busqueda}".`);
       return finalizar(404, {
         error: true,
-        mensaje: 'Audio oficial no disponible'
+        mensaje: 'Audio oficial de estudio no disponible'
       });
     }
 
@@ -1064,6 +991,8 @@ app.get('/api/descargar-cancion', async (req, res) => {
   const duracionSugerida = parseInt(req.query.seconds) || 0;
   const artistaSugerido = (req.query.artist || '').trim();
   const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
+  // Modo estricto (importaciones de Spotify y botón 🔄): ignora el videoId del cliente y exige máster oficial verificado
+  const modoEstricto = req.query.estricto === '1' || req.query.estricto === 'true' || req.query.origen === 'spotify';
 
   if (!busqueda && !videoId) {
     return responderError(400, 'Debes enviar ?q= o ?videoId=');
@@ -1075,7 +1004,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
   try {
     let video = null;
 
-    if (videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
+    if (!modoEstricto && videoId && !videoId.startsWith('itunes_') && videoId.length === 11) {
       video = {
         videoId: videoId,
         seconds: duracionSugerida,
@@ -1083,7 +1012,8 @@ app.get('/api/descargar-cancion', async (req, res) => {
         title: busqueda,
         tituloOriginal: busqueda,
         artistaOriginal: artistaSugerido,
-        author: { name: artistaSugerido }
+        author: { name: artistaSugerido },
+        esStubCliente: true
       };
     } else {
       video = await buscarVideoEnYouTube(busqueda, artistaSugerido, duracionSugerida);
@@ -1095,16 +1025,16 @@ app.get('/api/descargar-cancion', async (req, res) => {
     }
 
     if (!video) {
-      return responderError(404, 'Audio oficial no disponible');
+      return responderError(404, 'Audio oficial de estudio no disponible');
     }
 
     const trackTitle = video.title || busqueda;
 
     // 1. Resolver enlace mediante la cascada oficial de estudio (Prohibido covers de relleno)
-    let resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
+    let resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado, { estricto: modoEstricto });
 
     if (!resultadoAudio || !resultadoAudio.url) {
-      return responderError(404, 'Audio oficial no disponible');
+      return responderError(404, 'Audio oficial de estudio no disponible');
     }
 
     let downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');
@@ -1169,7 +1099,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
     if (!esValido) {
       console.warn(`[Downgrade Transparente]: Proveedor inicial (${resultadoAudio.proveedor}) saturado o fallido. Conmutando a flujo estándar (160k/128k)...`);
       try {
-        const fallbackAudio = await resolverAudioConCascada(video, busqueda, 'mp3');
+        const fallbackAudio = await resolverAudioConCascada(video, busqueda, 'mp3', { estricto: modoEstricto });
         if (fallbackAudio && fallbackAudio.url && fallbackAudio.url !== downloadUrl) {
           resultadoAudio = fallbackAudio;
           downloadUrl = fallbackAudio.url.replace(/^http:\/\//i, 'https://');
