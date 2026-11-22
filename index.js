@@ -1405,6 +1405,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Manifiesto ligero OTA para @capawesome/capacitor-live-update (el .zip vive en GitHub Releases)
+app.get('/api/ota/version.json', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.status(200).json({
+    version: (process.env.OTA_BUNDLE_VERSION || '5.2.0').trim(),
+    bundleUrl: (process.env.OTA_BUNDLE_URL || '').trim(),
+    notes: (process.env.OTA_NOTES || '').trim(),
+    updatedAt: new Date().toISOString()
+  });
+});
+
 // Validación de metadatos y duraciones candidatas con MusicBrainz (1 req/s + caché)
 app.get('/api/musicbrainz/validate', async (req, res) => {
   const title = String(req.query.title || '').trim();
