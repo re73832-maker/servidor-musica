@@ -1,5 +1,5 @@
-const CACHE_NAME = 'app-musica-v4.3.0';
-const MEDIA_CACHE_NAME = 'app-musica-media-v4.3.0';
+const CACHE_NAME = 'app-musica-v4.3.1';
+const MEDIA_CACHE_NAME = 'app-musica-media-v4.3.1';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
