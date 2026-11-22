@@ -797,7 +797,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
     }
 
     if (!video) {
-      return finalizar(404, { error: true, mensaje: 'No se encontró el audio oficial de estudio del artista' });
+      return finalizar(404, { error: true, mensaje: 'Audio oficial no disponible' });
     }
 
     const trackTitle = video.title || busqueda;
@@ -810,10 +810,10 @@ app.get('/api/obtener-enlace', async (req, res) => {
     const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
 
     if (!resultadoAudio || !resultadoAudio.url) {
-      console.warn(`[Aviso Cascada Oficial]: No se encontró el audio oficial de estudio del artista para "${busqueda}".`);
+      console.warn(`[Aviso Cascada Oficial]: Audio oficial no disponible para "${busqueda}".`);
       return finalizar(404, {
         error: true,
-        mensaje: 'No se encontró el audio oficial de estudio del artista'
+        mensaje: 'Audio oficial no disponible'
       });
     }
 
@@ -1095,7 +1095,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
     }
 
     if (!video) {
-      return responderError(404, 'No se encontró el audio oficial de estudio del artista');
+      return responderError(404, 'Audio oficial no disponible');
     }
 
     const trackTitle = video.title || busqueda;
@@ -1104,7 +1104,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
     let resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado);
 
     if (!resultadoAudio || !resultadoAudio.url) {
-      return responderError(404, 'No se encontró el audio oficial de estudio del artista');
+      return responderError(404, 'Audio oficial no disponible');
     }
 
     let downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');
