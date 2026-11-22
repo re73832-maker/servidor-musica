@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v4.2.0 Oficial 🚀',
-    cacheVersion: 'app-musica-v4.2.0',
+    version: 'v4.3.0 Oficial 🚀',
+    cacheVersion: 'app-musica-v4.3.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -691,7 +691,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
   const artistaSugerido = (req.query.artist || '').trim();
   const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
   // Modo estricto (importaciones de Spotify y botón 🔄): ignora el videoId del cliente y exige máster oficial verificado
-  const modoEstricto = req.query.estricto === '1' || req.query.estricto === 'true' || req.query.origen === 'spotify';
+  const modoEstricto = req.query.estricto === '1' || req.query.estricto === 'true' || req.query.forzarOficial === '1' || req.query.forzarOficial === 'true' || req.query.origen === 'spotify';
 
   if (!busqueda && !videoId) {
     return finalizar(400, { error: true, mensaje: 'Debes enviar ?q= o ?videoId=' });
@@ -769,6 +769,119 @@ app.get('/api/obtener-enlace', async (req, res) => {
       error: true,
       mensaje: 'Audio no disponible temporalmente'
     });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ENDPOINT: POST /api/resolver-oficial
+// Reemplazo Hi-Fi exclusivo para el botón 🔄 y descargas oficiales forzadas
+// ---------------------------------------------------------------------------
+app.options('/api/resolver-oficial', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  return res.sendStatus(204);
+});
+
+app.post('/api/resolver-oficial', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, X-Titulo-Audio, X-Calidad-Audio');
+
+  const titulo = String(req.body?.titulo || '').trim();
+  const artista = String(req.body?.artista || '').trim();
+  const duracionSegundos = parseInt(req.body?.duracionSegundos) || 0;
+
+  if (!titulo) {
+    return res.status(400).json({ error: true, mensaje: 'Debes enviar titulo' });
+  }
+
+  let respondido = false;
+  let streamActivo = null;
+  const timeoutGuard = setTimeout(() => {
+    if (!respondido && !res.headersSent) {
+      respondido = true;
+      if (streamActivo && typeof streamActivo.destroy === 'function') streamActivo.destroy();
+      return res.status(504).json({ error: true, mensaje: 'Tiempo de espera agotado al resolver audio oficial' });
+    }
+  }, 60000);
+
+  res.on('close', () => {
+    clearTimeout(timeoutGuard);
+    if (streamActivo && typeof streamActivo.destroy === 'function') streamActivo.destroy();
+  });
+
+  try {
+    console.log(`\n[POST /api/resolver-oficial]: "${artista ? `${artista} - ` : ''}${titulo}" (durRef: ${duracionSegundos}s)`);
+    const video = await buscarVideoEnYouTube(titulo, artista, duracionSegundos);
+    if (!video) {
+      clearTimeout(timeoutGuard);
+      return res.status(404).json({ error: true, mensaje: 'Audio oficial no disponible' });
+    }
+
+    video.duracionRef = duracionSegundos || video.seconds || 0;
+    video.tituloOriginal = titulo;
+    video.artistaOriginal = artista;
+
+    // Priorizar máxima calidad disponible (m4a/AAC nativo o MP3 320k sin re-comprimir)
+    let resultadoAudio = await resolverAudioConCascada(video, titulo, 'm4a', { estricto: true });
+    if (!resultadoAudio || !resultadoAudio.url) {
+      resultadoAudio = await resolverAudioConCascada(video, titulo, 'mp3', { estricto: true });
+    }
+
+    if (!resultadoAudio || !resultadoAudio.url) {
+      clearTimeout(timeoutGuard);
+      return res.status(404).json({ error: true, mensaje: 'Audio oficial no disponible' });
+    }
+
+    const downloadUrl = resultadoAudio.url.replace(/^http:\/\//i, 'https://');
+    const response = await axios({
+      method: 'get',
+      url: downloadUrl,
+      responseType: 'stream',
+      signal: AbortSignal.timeout(55000),
+      timeout: 55000,
+      headers: {
+        'Referer': 'https://loader.to/',
+        'User-Agent': UA,
+        'Accept': '*/*'
+      },
+      maxRedirects: 5,
+      validateStatus: () => true
+    });
+
+    const ct = (response?.headers?.['content-type'] || '').toLowerCase();
+    if (!response || response.status !== 200 || ct.includes('text/html') || ct.includes('application/json') || ct.includes('mpegurl')) {
+      clearTimeout(timeoutGuard);
+      return res.status(502).json({ error: true, mensaje: 'No se pudo descargar el stream oficial' });
+    }
+
+    clearTimeout(timeoutGuard);
+    respondido = true;
+
+    const mime = ct.startsWith('audio/') ? ct : (downloadUrl.includes('mime=audio%2Fmp4') || downloadUrl.includes('.m4a') ? 'audio/mp4' : 'audio/mpeg');
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Titulo-Audio', encodeURIComponent(video.title || titulo));
+    res.setHeader('X-Calidad-Audio', resultadoAudio.calidad || 'Hi-Fi');
+    if (response.headers['content-length']) {
+      res.setHeader('Content-Length', response.headers['content-length']);
+    }
+
+    streamActivo = response.data;
+    streamActivo.on('error', () => {
+      if (!res.headersSent) res.status(500).json({ error: true, mensaje: 'Error en stream oficial' });
+      else res.destroy();
+    });
+    streamActivo.pipe(res);
+  } catch (err) {
+    clearTimeout(timeoutGuard);
+    console.error('[Error /api/resolver-oficial]:', err.message || err);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: true, mensaje: 'Error interno al resolver audio oficial' });
+    }
   }
 });
 
@@ -992,7 +1105,7 @@ app.get('/api/descargar-cancion', async (req, res) => {
   const artistaSugerido = (req.query.artist || '').trim();
   const formatoDeseado = (req.query.formato || req.query.calidad || req.query.format || 'mp3').toLowerCase().trim();
   // Modo estricto (importaciones de Spotify y botón 🔄): ignora el videoId del cliente y exige máster oficial verificado
-  const modoEstricto = req.query.estricto === '1' || req.query.estricto === 'true' || req.query.origen === 'spotify';
+  const modoEstricto = req.query.estricto === '1' || req.query.estricto === 'true' || req.query.forzarOficial === '1' || req.query.forzarOficial === 'true' || req.query.origen === 'spotify';
 
   if (!busqueda && !videoId) {
     return responderError(400, 'Debes enviar ?q= o ?videoId=');

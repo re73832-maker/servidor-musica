@@ -69,8 +69,8 @@ const PALABRAS_LISTA_NEGRA_ESTRICTA = [
   'concierto'
 ];
 
-// Tolerancia máxima de duración frente al máster oficial de estudio (v4.2.0)
-const TOLERANCIA_DURACION_OFICIAL_SEGS = 4;
+// Tolerancia máxima de duración frente al máster oficial de estudio (v4.3.0: ±5s)
+const TOLERANCIA_DURACION_OFICIAL_SEGS = 5;
 
 // ---------------------------------------------------------------------------
 // PASO A — VERIFICACIÓN DE MÁSTER OFICIAL (Deezer API pública + respaldo iTunes)
@@ -255,12 +255,12 @@ function construirConsultasOriginalYRescate(tituloRaw = '', artistaRaw = '') {
 
   const consultasDiscograficas = artistaPrincipal
     ? [
-        `"Provided to YouTube by" "${tituloLimpio}" "${artistaPrincipal}"`,
+        `"${artistaPrincipal}" "${tituloLimpio}" "Provided to YouTube"`,
         `"${tituloLimpio}" "${artistaPrincipal} - Topic"`,
-        `"${artistaPrincipal}" "${tituloLimpio}" "Official Audio"`
+        `"${artistaPrincipal} - ${tituloLimpio}" "Official Audio"`
       ]
     : [
-        `"Provided to YouTube by" "${tituloLimpio}"`,
+        `"Provided to YouTube" "${tituloLimpio}"`,
         `"${tituloLimpio}" "Official Audio"`
       ];
 
@@ -614,15 +614,24 @@ async function resolverInvidiousDirecto(videoId) {
         headers: { 'User-Agent': UA }
       });
       const formatos = (r.data?.adaptiveFormats || []).filter((f) => f.type?.startsWith('audio/') && f.url);
+      formatos.sort((a, b) => {
+        const bitDiff = (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0);
+        if (bitDiff !== 0) return bitDiff;
+        const aM4a = String(a.type || '').includes('audio/mp4') ? 1 : 0;
+        const bM4a = String(b.type || '').includes('audio/mp4') ? 1 : 0;
+        return bM4a - aM4a;
+      });
       const mejor =
+        formatos[0] ||
+        formatos.find((f) => String(f.itag) === '141') ||
         formatos.find((f) => String(f.itag) === '140') ||
-        formatos.find((f) => String(f.itag) === '251') ||
-        formatos[0];
+        formatos.find((f) => String(f.itag) === '251');
       if (mejor && mejor.url) {
-        console.log(`[Invidious Oficial Éxito]: Resuelto audio original de YouTube (${videoId}) vía ${host}`);
+        const kbps = mejor.bitrate ? `${Math.round(Number(mejor.bitrate) / 1000)}k` : '160k';
+        console.log(`[Invidious Oficial Éxito]: Resuelto audio original Hi-Fi (${videoId}, ${kbps}) vía ${host}`);
         return {
           url: mejor.url,
-          calidad: '160k',
+          calidad: kbps,
           nivel: 3,
           proveedor: 'Invidious-Official-Audio'
         };
