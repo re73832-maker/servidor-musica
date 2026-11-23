@@ -1026,6 +1026,9 @@ app.get('/api/proxy-stream', async (req, res) => {
   }
 
   if (!audioUrl) {
+    if (videoId || busqueda) {
+      return res.status(404).json({ error: 'Audio no disponible temporalmente para esta pista.' });
+    }
     return res.status(400).json({ error: 'Debes enviar el parámetro ?url= o ?videoId= o ?q=' });
   }
 

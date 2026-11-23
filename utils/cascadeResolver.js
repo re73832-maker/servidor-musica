@@ -1040,7 +1040,21 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', 
       ]);
       if (resYtdl && resYtdl.url) return resYtdl;
     } catch (e1) {
-      console.warn(`[Nivel 1 YTDL Oficial]: Pasando a Nivel 2 (${e1.message})`);
+      console.warn(`[Nivel 1 YTDL Oficial]: Falló para ${videoOficial.videoId} (${e1.message})`);
+    }
+
+    // Si el videoId vino del cliente y falló, intentar localizar otro videoId oficial alternativo
+    if (!estricto && !videoOficial.esVerificadoOficial && (titulo || artista)) {
+      try {
+        const altVid = await buscarVideoOriginalEnYouTube(titulo, artista, duracionRef, isrc);
+        if (altVid && altVid.videoId && altVid.videoId !== videoOficial.videoId) {
+          const resAltYtdl = await Promise.race([
+            resolverNativoYtdl(`https://www.youtube.com/watch?v=${altVid.videoId}`),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1B YTDL Timeout 8s')), 8000))
+          ]);
+          if (resAltYtdl && resAltYtdl.url) return resAltYtdl;
+        }
+      } catch (_) {}
     }
   }
 
