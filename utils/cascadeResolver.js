@@ -168,16 +168,24 @@ async function obtenerMasterOficial(titulo = '', artista = '', duracionSpotifySe
     }
   }
 
-  // 1) Deezer API pública por artista + track
+  // 1) Deezer API pública por artista + track (con respaldo de búsqueda abierta)
   if (!resultado && titulo && artista) {
     try {
       const q = `artist:"${artista}" track:"${titulo}"`;
       const r = await axios.get('https://api.deezer.com/search', {
         params: { q, limit: 5 },
-        timeout: 6000,
+        timeout: 5000,
         headers: { 'User-Agent': UA }
       });
-      const lista = Array.isArray(r.data?.data) ? r.data.data : [];
+      let lista = Array.isArray(r.data?.data) ? r.data.data : [];
+      if (lista.length === 0) {
+        const r2 = await axios.get('https://api.deezer.com/search', {
+          params: { q: `${artista} ${titulo}`, limit: 8 },
+          timeout: 5000,
+          headers: { 'User-Agent': UA }
+        });
+        lista = Array.isArray(r2.data?.data) ? r2.data.data : [];
+      }
       resultado = elegirMejor(
         lista.map((it) => ({
           titulo: it.title || it.title_short || '',
@@ -533,11 +541,11 @@ async function ensamblarHlsSoundCloudABuffer(m3u8Url) {
 }
 
 // ---------------------------------------------------------------------------
-// NIVEL 2: Extractor nativo @distube/ytdl-core (Directo de YouTube)
+// NIVEL 1: Extractor nativo @distube/ytdl-core (Directo de YouTube)
 // ---------------------------------------------------------------------------
 async function resolverNativoYtdl(videoUrl) {
   try {
-    console.log(`[Nivel 2 Nativo]: Extrayendo formatos con @distube/ytdl-core...`);
+    console.log(`[Nivel 1 Nativo]: Extrayendo formatos con @distube/ytdl-core...`);
     const info = await Promise.race([
       ytdlInstance.getInfo(videoUrl, {
         requestOptions: {
@@ -557,141 +565,194 @@ async function resolverNativoYtdl(videoUrl) {
     const audioOnly = audioFormats.filter((f) => !f.hasVideo);
     const lista = audioOnly.length > 0 ? audioOnly : audioFormats;
 
-    lista.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
+    // Preferir M4A (itag 140 / audio/mp4) por compatibilidad universal, luego mayor bitrate
+    lista.sort((a, b) => {
+      const aM4a = String(a.mimeType || '').includes('audio/mp4') ? 1 : 0;
+      const bM4a = String(b.mimeType || '').includes('audio/mp4') ? 1 : 0;
+      if (bM4a !== aM4a) return bM4a - aM4a;
+      return (b.audioBitrate || 0) - (a.audioBitrate || 0);
+    });
     const mejorFormato = lista[0];
 
     if (mejorFormato && mejorFormato.url) {
       const bitrate = mejorFormato.audioBitrate || 128;
-      let finalUrl = mejorFormato.url;
-      const clen = Number(mejorFormato.contentLength);
-      if (clen > 0 && !finalUrl.includes('range=')) {
-        finalUrl += (finalUrl.includes('?') ? '&' : '?') + `range=0-${clen - 1}`;
-      }
-      console.log(`[Nivel 2 Éxito]: Stream nativo resuelto (${bitrate} kbps)`);
+      console.log(`[Nivel 1 Éxito]: Stream nativo resuelto (${bitrate} kbps, itag ${mejorFormato.itag || '?'})`);
       return {
-        url: finalUrl,
+        url: mejorFormato.url,
         calidad: `${bitrate}k`,
-        nivel: 2,
+        nivel: 1,
         proveedor: 'ytdl-native-stream'
       };
     }
   } catch (err) {
-    console.warn(`[Nivel 2 Aviso]: ytdl-core no pudo extraer enlace:`, err.message || err);
+    console.warn(`[Nivel 1 Aviso]: ytdl-core no pudo extraer enlace:`, err.message || err);
   }
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// NIVEL 3: Loader / Savenow (Solo si no devuelve api_key_required)
+// NIVEL 2: SoundCloud API v2 (Streams progresivos MP3 o HLS sin cifrado)
 // ---------------------------------------------------------------------------
-async function probarLoaderSavenow(videoUrl, formato) {
-  const dominios = [
-    'https://p.savenow.to',
-    'https://loader.to',
-    'https://p.lbserver.xyz'
-  ];
+let scClientIdCache = { id: null, fetchedAt: 0 };
 
-  for (const dominio of dominios) {
-    try {
-      const startRes = await axios.get(`${dominio}/api/v2/download`, {
-        params: { button: 1, format: formato, url: videoUrl },
-        headers: { 'User-Agent': UA, 'Referer': 'https://en.loader.to/' },
-        signal: getTimeoutSignal(5000),
+async function obtenerSoundCloudClientId() {
+  if (scClientIdCache.id && Date.now() - scClientIdCache.fetchedAt < 6 * 60 * 60 * 1000) {
+    return scClientIdCache.id;
+  }
+  try {
+    const html = await axios.get('https://soundcloud.com', {
+      timeout: 5000,
+      headers: { 'User-Agent': UA }
+    });
+    const scripts = [...String(html.data || '').matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)].map((m) => m[1]);
+    for (const sUrl of scripts.slice(-5)) {
+      try {
+        const js = await axios.get(sUrl, { timeout: 5000 });
+        const m = String(js.data || '').match(/client_id\s*:\s*"([a-zA-Z0-9]{20,40})"/);
+        if (m && m[1]) {
+          scClientIdCache = { id: m[1], fetchedAt: Date.now() };
+          return m[1];
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function resolverSoundCloudDirecto(titulo = '', artista = '', duracionRef = 0) {
+  const q = `${artista} ${titulo}`.trim();
+  if (!q) return null;
+  try {
+    const clientId = await obtenerSoundCloudClientId();
+    if (!clientId) return null;
+
+    const sr = await axios.get('https://api-v2.soundcloud.com/search/tracks', {
+      params: { q, client_id: clientId, limit: 10 },
+      timeout: 6000,
+      headers: { 'User-Agent': UA }
+    });
+    const tracks = Array.isArray(sr.data?.collection) ? sr.data.collection : [];
+    const normTit = normalizarTextoSimple(limpiarTituloParaRescate(titulo) || titulo);
+    const normArt = normalizarTextoSimple(artista.split(/,|&|\bfeat\.?\b|\bft\.?\b/i)[0] || artista);
+
+    for (const tr of tracks) {
+      if (!tr || !tr.media || !Array.isArray(tr.media.transcodings)) continue;
+      const durSeg = Math.round((Number(tr.duration) || 0) / 1000);
+      if (durSeg < 45) continue; // Ignorar previews de 30s
+      if (duracionRef > 0 && Math.abs(durSeg - duracionRef) > 20) continue;
+
+      const tNorm = normalizarTextoSimple(tr.title || '');
+      const uNorm = normalizarTextoSimple(tr.user?.username || '');
+      const palabrasTit = normTit.split(' ').filter((w) => w.length >= 2);
+      const coincidenciasTit = palabrasTit.filter((w) => tNorm.includes(w));
+      if (palabrasTit.length > 0 && coincidenciasTit.length < Math.ceil(palabrasTit.length * 0.7)) continue;
+      if (/\b(edit|mashup|megamix|cocktail|slowed|reverb|sped up)\b/i.test(tr.title || '') && !/\b(edit|mashup|slowed|reverb)\b/i.test(titulo || '')) continue;
+      if (esResultadoEnListaNegra(tr.title || '', tr.user?.username || '', titulo)) continue;
+      if (normArt && !tNorm.includes(normArt) && !uNorm.includes(normArt)) continue;
+
+      // Buscar transcoding NO cifrado y NO snipped (progressive MP3 primero, luego HLS)
+      const transcoding =
+        tr.media.transcodings.find((t) => !t.snipped && t.format?.protocol === 'progressive') ||
+        tr.media.transcodings.find((t) => !t.snipped && t.format?.protocol === 'hls');
+
+      if (!transcoding || !transcoding.url) continue;
+
+      const streamResp = await axios.get(transcoding.url, {
+        params: { client_id: clientId },
         timeout: 5000,
-        validateStatus: (status) => status === 200
-      });
-
-      if (!startRes.data || startRes.data.error_code === 'api_key_required' || !startRes.data.id) {
-        break;
-      }
-
-      const progressUrl = startRes.data.progress_url || `${dominio}/api/progress?id=${startRes.data.id}`;
-
-      for (let i = 0; i < 8; i++) {
-        await new Promise((r) => setTimeout(r, 700));
-        try {
-          const pRes = await axios.get(progressUrl, {
-            headers: { 'User-Agent': UA, 'Referer': 'https://en.loader.to/' },
-            signal: getTimeoutSignal(4000),
-            timeout: 4000,
-            validateStatus: (status) => status === 200
-          });
-
-          const pData = pRes.data;
-          if (!pData) continue;
-
-          const downloadLink = pData.download_url || (pData.progress >= 1000 ? pData.url : null);
-          if (
-            downloadLink &&
-            typeof downloadLink === 'string' &&
-            downloadLink.length > 15 &&
-            !downloadLink.includes('b.php') &&
-            !downloadLink.includes('ey43.com') &&
-            (pData.success === 1 || pData.success === true || pData.progress >= 1000 || pData.text === 'Finished')
-          ) {
-            const httpsLink = downloadLink.replace(/^http:\/\//i, 'https://');
-            console.log(`[Nivel 3 Éxito]: Loader/Savenow (${dominio}) en intento ${i + 1}`);
-            return {
-              url: httpsLink,
-              calidad: '320k',
-              nivel: 3,
-              proveedor: 'Loader.to'
-            };
-          }
-
-          if (pData.text && pData.text.toLowerCase().includes('error')) break;
-        } catch (_) {}
-      }
-    } catch (_) {}
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// NIVEL 3: Invidious Adaptive Audio Directo (itag 140 M4A / 251 Opus de YouTube oficial)
-// ---------------------------------------------------------------------------
-async function resolverInvidiousDirecto(videoId) {
-  if (!videoId || videoId.length !== 11) return null;
-  const invidiousHosts = [
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://yewtu.be',
-    'https://invidious.jing.rocks',
-    'https://invidious.f5.si',
-    'https://inv.tux.pizza'
-  ];
-
-  for (const host of invidiousHosts) {
-    try {
-      const r = await axios.get(`${host}/api/v1/videos/${videoId}`, {
-        signal: getTimeoutSignal(6000),
-        timeout: 6000,
         headers: { 'User-Agent': UA }
       });
-      const formatos = (r.data?.adaptiveFormats || []).filter((f) => f.type?.startsWith('audio/') && f.url);
-      formatos.sort((a, b) => {
-        const bitDiff = (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0);
-        if (bitDiff !== 0) return bitDiff;
-        const aM4a = String(a.type || '').includes('audio/mp4') ? 1 : 0;
-        const bM4a = String(b.type || '').includes('audio/mp4') ? 1 : 0;
-        return bM4a - aM4a;
-      });
-      const mejor =
-        formatos[0] ||
-        formatos.find((f) => String(f.itag) === '141') ||
-        formatos.find((f) => String(f.itag) === '140') ||
-        formatos.find((f) => String(f.itag) === '251');
-      if (mejor && mejor.url) {
-        const kbps = mejor.bitrate ? `${Math.round(Number(mejor.bitrate) / 1000)}k` : '160k';
-        console.log(`[Invidious Oficial Éxito]: Resuelto audio original Hi-Fi (${videoId}, ${kbps}) vía ${host}`);
+
+      if (streamResp.data && streamResp.data.url) {
+        const esHls = transcoding.format?.protocol === 'hls';
+        console.log(`[Nivel 2 SoundCloud Éxito]: "${tr.title}" (${durSeg}s, ${esHls ? 'HLS' : 'MP3'})`);
         return {
-          url: mejor.url,
-          calidad: kbps,
-          nivel: 3,
-          proveedor: 'Invidious-Official-Audio'
+          url: streamResp.data.url,
+          calidad: '160k',
+          nivel: 2,
+          proveedor: 'SoundCloud-Direct',
+          esHlsSoundCloud: esHls
         };
       }
-    } catch (_) {}
+    }
+  } catch (errSc) {
+    console.warn('[Nivel 2 SoundCloud Aviso]:', errSc.message || errSc);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// NIVEL 3: Audius Discovery API (MP3 completos gratuitos)
+// ---------------------------------------------------------------------------
+async function resolverAudiusDirecto(titulo = '', artista = '', duracionRef = 0) {
+  const q = `${artista} ${titulo}`.trim();
+  if (!q) return null;
+  try {
+    const r = await axios.get('https://discoveryprovider.audius.co/v1/tracks/search', {
+      params: { query: q, app_name: 'AppMusica' },
+      timeout: 6000,
+      headers: { 'User-Agent': UA }
+    });
+    const lista = Array.isArray(r.data?.data) ? r.data.data : [];
+    const normTit = normalizarTextoSimple(limpiarTituloParaRescate(titulo) || titulo);
+    const normArt = normalizarTextoSimple(artista.split(/,|&|\bfeat\.?\b|\bft\.?\b/i)[0] || artista);
+
+    for (const tr of lista.slice(0, 8)) {
+      if (!tr || !tr.id || !tr.is_streamable) continue;
+      const durSeg = Number(tr.duration) || 0;
+      if (durSeg < 45) continue;
+      if (duracionRef > 0 && Math.abs(durSeg - duracionRef) > 20) continue;
+
+      const tNorm = normalizarTextoSimple(tr.title || '');
+      const uNorm = normalizarTextoSimple(tr.user?.name || '');
+      if (normTit && !tNorm.includes(normTit.split(' ')[0])) continue;
+      if (esResultadoEnListaNegra(tr.title || '', tr.user?.name || '', titulo)) continue;
+      if (normArt && !tNorm.includes(normArt) && !uNorm.includes(normArt)) continue;
+
+      const streamUrl = `https://discoveryprovider.audius.co/v1/tracks/${encodeURIComponent(tr.id)}/stream?app_name=AppMusica`;
+      console.log(`[Nivel 3 Audius Éxito]: "${tr.title}" (${durSeg}s)`);
+      return {
+        url: streamUrl,
+        calidad: '320k',
+        nivel: 3,
+        proveedor: 'Audius-Direct'
+      };
+    }
+  } catch (errAud) {
+    console.warn('[Nivel 3 Audius Aviso]:', errAud.message || errAud);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// NIVEL 4: Internet Archive (MP3 de dominio público / archivos abiertos)
+// ---------------------------------------------------------------------------
+async function resolverInternetArchiveDirecto(titulo = '', artista = '') {
+  const q = `${artista} ${titulo}`.trim();
+  if (!q) return null;
+  try {
+    const InternetArchiveSource = require('../sources/InternetArchiveSource');
+    const ia = new InternetArchiveSource();
+    const resultados = await ia.search(q, 5);
+    const normTit = normalizarTextoSimple(limpiarTituloParaRescate(titulo) || titulo);
+    for (const item of resultados) {
+      if (!item || !item.videoId) continue;
+      if (esResultadoEnListaNegra(item.title || '', item.artist || '', titulo)) continue;
+      const tNorm = normalizarTextoSimple(item.title || '');
+      if (normTit && !tNorm.includes(normTit.split(' ')[0])) continue;
+      const streamInfo = await ia.getStream(item.videoId);
+      if (streamInfo && streamInfo.downloadUrl) {
+        console.log(`[Nivel 4 Internet Archive Éxito]: "${item.title}"`);
+        return {
+          url: streamInfo.downloadUrl,
+          calidad: '192k',
+          nivel: 4,
+          proveedor: 'InternetArchive-Direct'
+        };
+      }
+    }
+  } catch (errIa) {
+    console.warn('[Nivel 4 IA Aviso]:', errIa.message || errIa);
   }
   return null;
 }
@@ -824,56 +885,81 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
     }
   }
 
-  // 3. Respaldo ÚNICAMENTE si ytmusic-api falló en Render (bloqueo regional / vacío):
-  // Canales autogenerados por disquera (" - Topic" / "Provided to YouTube by") con tolerancia estricta ±2s
-  if (candidatosValidos.length === 0 && ytmusicFallo && artistaPrincipal && tituloLimpio) {
-    const consultasTopic = [
-      `"${tituloLimpio}" "${artistaPrincipal} - Topic"`,
-      `"Provided to YouTube by" "${tituloLimpio}" "${artistaPrincipal}"`
-    ];
-    for (const qTopic of consultasTopic) {
+  // 3. Respaldo robusto con yt-search cuando ytmusic-api falla o devuelve vacío:
+  // Prioriza canales "- Topic" / "Provided to YouTube by" / VEVO / artista oficial, y como respaldo
+  // acepta audios limpios en YouTube (sin cover/karaoke/live) que coincidan en título, artista y duración.
+  if (candidatosValidos.length === 0 && (tituloLimpio || titulo)) {
+    const baseArt = artistaPrincipal || artista || '';
+    const baseTit = tituloLimpio || titulo;
+    const consultasYt = baseArt
+      ? [
+          `${baseArt} ${baseTit} Topic`,
+          `${baseArt} ${baseTit} Official Audio`,
+          `${baseArt} ${baseTit}`
+        ]
+      : [
+          `${baseTit} Official Audio`,
+          `${baseTit}`
+        ];
+
+    for (const qYt of consultasYt) {
       try {
-        const resTopic = await yts(qTopic);
-        const videos = resTopic && Array.isArray(resTopic.videos) ? resTopic.videos : [];
-        for (const v of videos) {
+        const resYt = await yts(qYt);
+        const videos = resYt && Array.isArray(resYt.videos) ? resYt.videos : [];
+        for (const v of videos.slice(0, 12)) {
           if (!v || !v.videoId || vistos.has(v.videoId)) continue;
           vistos.add(v.videoId);
 
           const autorNombre = String((v.author && v.author.name) || v.author || '').trim();
           const desc = String(v.description || '');
-          const esCanalTopicDisquera =
-            autorNombre.endsWith(' - Topic') || desc.includes('Provided to YouTube by');
-          if (!esCanalTopicDisquera) continue;
+          const tituloVid = String(v.title || '').trim();
+          const durVid = Number(v.seconds) || 0;
+          if (durVid > 0 && (durVid < 45 || durVid > 720)) continue;
 
-          if (esResultadoEnListaNegra(v.title || '', autorNombre, titulo)) continue;
+          if (esResultadoEnListaNegra(tituloVid, autorNombre, titulo)) continue;
 
+          const normVidTitle = normalizarTextoSimple(tituloVid);
           const normAutor = normalizarTextoSimple(autorNombre);
-          const artistaCoincide =
-            artistasAceptados.length === 0 ||
-            artistasAceptados.some((art) => normAutor && normAutor.includes(art));
-          if (!artistaCoincide) continue;
-
-          const normVidTitle = normalizarTextoSimple(v.title || '');
           const palabrasCoinciden = palabrasTitulo.filter((w) => normVidTitle.includes(w));
           const tituloCoincide =
             !normTituloOrig ||
             normVidTitle.includes(normTituloOrig) ||
-            (palabrasTitulo.length > 0 && palabrasCoinciden.length >= Math.ceil(palabrasTitulo.length * 0.7));
+            (palabrasTitulo.length > 0 && palabrasCoinciden.length >= Math.ceil(palabrasTitulo.length * 0.65));
           if (!tituloCoincide) continue;
 
-          const durVid = Number(v.seconds) || 0;
-          const diffSegs = duracionRefSegs > 0 ? Math.abs(durVid - duracionRefSegs) : 0;
-          if (duracionRefSegs > 0 && (durVid <= 0 || diffSegs > TOLERANCIA_DURACION_OFICIAL_SEGS)) {
-            continue;
-          }
+          const artistaEnTituloOAutor =
+            artistasAceptados.length === 0 ||
+            artistasAceptados.some((art) => (normAutor && normAutor.includes(art)) || normVidTitle.includes(art));
+          if (!artistaEnTituloOAutor) continue;
 
-          candidatosValidos.push({
-            song: { videoId: v.videoId },
-            songTitle: v.title || tituloLimpio,
-            songArtistText: autorNombre,
-            songDuration: durVid,
-            diffSegs
-          });
+          const esCanalOficial =
+            autorNombre.endsWith(' - Topic') ||
+            desc.includes('Provided to YouTube by') ||
+            /vevo/i.test(autorNombre) ||
+            artistasAceptados.some((art) => normAutor && normAutor.includes(art));
+
+          if (!esCanalOficial) continue;
+
+          const diffSegs = duracionRefSegs > 0 && durVid > 0 ? Math.abs(durVid - duracionRefSegs) : 0;
+          const esOfficialAudio = /\b(official\s*audio|audio\s*oficial|topic)\b/i.test(`${tituloVid} ${autorNombre}`);
+
+          if (duracionRefSegs === 0 || diffSegs <= 6) {
+            candidatosValidos.push({
+              song: { videoId: v.videoId },
+              songTitle: tituloVid || baseTit,
+              songArtistText: autorNombre || baseArt,
+              songDuration: durVid,
+              diffSegs: diffSegs - (esOfficialAudio ? 2 : 0)
+            });
+          } else if (diffSegs <= 20) {
+            candidatosRelajados.push({
+              song: { videoId: v.videoId },
+              songTitle: tituloVid || baseTit,
+              songArtistText: autorNombre || baseArt,
+              songDuration: durVid,
+              diffSegs: diffSegs - (esOfficialAudio ? 2 : 0)
+            });
+          }
         }
         if (candidatosValidos.length > 0) break;
       } catch (_) {}
@@ -882,7 +968,7 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
 
   const listaFinal = candidatosValidos.length > 0 ? candidatosValidos : candidatosRelajados;
 
-  // 4. Cero Relleno: si ningún resultado cumple estas condiciones, devolver null (-> 404)
+  // 4. Si ningún resultado cumple estas condiciones, devolver null
   if (listaFinal.length === 0) {
     console.warn(`[Studio-Pure]: Pista oficial de estudio no disponible para "${artistaPrincipal} - ${tituloLimpio}"`);
     return null;
@@ -903,11 +989,12 @@ async function buscarVideoOriginalEnYouTube(tituloRaw = '', artistaRaw = '', dur
 }
 
 // ---------------------------------------------------------------------------
-// FUNCIÓN MAESTRA EN CASCADA (CERO VIDEOS GENERALES / SOLO PISTAS SONG YTMUSIC)
+// FUNCIÓN MAESTRA EN CASCADA (YouTube + SoundCloud + Audius + Internet Archive)
 // ---------------------------------------------------------------------------
 async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', opciones = {}) {
   const formato = normalizarFormato(formatoDeseado);
   const estricto = Boolean(opciones.estricto || video?.estricto);
+  const omitir = new Set(Array.isArray(opciones.omitirProveedores) ? opciones.omitirProveedores : []);
   const duracionRef = video?.duracionRef || video?.seconds || 0;
   const artistaOriginal = video?.artistaOriginal || (video?.author && video.author.name) || '';
   const tituloOriginal = video?.tituloOriginal || busqueda || video?.title || '';
@@ -915,7 +1002,9 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', 
 
   const {
     titulo,
+    tituloLimpio,
     artista,
+    artistaPrincipal,
     consultaOriginal
   } = construirConsultasOriginalYRescate(tituloOriginal, artistaOriginal);
 
@@ -937,46 +1026,66 @@ async function resolverAudioConCascada(video, busqueda, formatoDeseado = 'mp3', 
     videoOficial.videoId.length === 11 &&
     !videoOficial.videoId.startsWith('itunes_')
   );
-  if (!esYouTubeValido) {
-    console.error(`[Cascada Oficial]: Audio oficial de estudio no disponible para "${artista} - ${titulo}".`);
-    return null;
-  }
-  const videoUrl = `https://www.youtube.com/watch?v=${videoOficial.videoId}`;
 
   console.log(`\n----------------------------------------------------------------------`);
-  console.log(`[Cascada Oficial Estudio]: Resolviendo "${consultaOriginal}" (VideoID: ${videoOficial.videoId}, Canal: "${videoOficial?.author?.name || 'N/A'}", DurRef: ${videoOficial.duracionRefVerificada || duracionRef}s, estricto: ${estricto})`);
+  console.log(`[Cascada Oficial Estudio]: Resolviendo "${consultaOriginal}" (VideoID: ${esYouTubeValido ? videoOficial.videoId : 'N/A'}, Canal: "${videoOficial?.author?.name || 'N/A'}", DurRef: ${videoOficial?.duracionRefVerificada || duracionRef}s, estricto: ${estricto})`);
 
-  // 1. Extractor nativo @distube/ytdl-core sobre el video OFICIAL verificado
-  try {
-    const resYtdl = await Promise.race([
-      resolverNativoYtdl(videoUrl),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1 YTDL Timeout 8s')), 8000))
-    ]);
-    if (resYtdl && resYtdl.url) return resYtdl;
-  } catch (e1) {
-    console.warn(`[Nivel 1 YTDL Oficial]: Pasando a Nivel 2 (${e1.message})`);
+  // 1. Extractor nativo @distube/ytdl-core sobre el video de YouTube (si no está omitido)
+  if (esYouTubeValido && !omitir.has('ytdl-native-stream')) {
+    const videoUrl = `https://www.youtube.com/watch?v=${videoOficial.videoId}`;
+    try {
+      const resYtdl = await Promise.race([
+        resolverNativoYtdl(videoUrl),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 1 YTDL Timeout 8s')), 8000))
+      ]);
+      if (resYtdl && resYtdl.url) return resYtdl;
+    } catch (e1) {
+      console.warn(`[Nivel 1 YTDL Oficial]: Pasando a Nivel 2 (${e1.message})`);
+    }
   }
 
-  // 2. Loader / Savenow sobre el mismo video OFICIAL verificado
-  try {
-    const resLoader = await Promise.race([
-      probarLoaderSavenow(videoUrl, formato),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Nivel 2 Loader Timeout 8s')), 8000))
-    ]);
-    if (resLoader && resLoader.url) return resLoader;
-  } catch (e2) {
-    console.warn(`[Nivel 2 Loader Oficial]: Pasando a Nivel 3 (${e2.message})`);
+  const titBusq = tituloLimpio || titulo || busqueda;
+  const artBusq = artistaPrincipal || artista || '';
+  const durBusq = videoOficial?.duracionRefVerificada || duracionRef || 0;
+
+  // En modo estricto (importación de Spotify), NUNCA sustituir con SoundCloud/Audius/IA
+  // para evitar descargar covers, imitadores o audios con otra voz.
+  if (estricto) {
+    console.warn(`[Cascada Oficial]: Modo estricto activo — omitiendo fuentes no oficiales para "${artBusq} - ${titBusq}".`);
+    return null;
   }
 
-  // 3. Invidious Adaptive Audio sobre el mismo videoId OFICIAL verificado
-  try {
-    const resInv = await resolverInvidiousDirecto(videoOficial.videoId);
-    if (resInv && resInv.url) return resInv;
-  } catch (e3) {
-    console.warn(`[Nivel 3 Invidious Oficial]: Falló (${e3.message})`);
+  // 2. SoundCloud API v2 (Streams MP3/HLS sin cifrado)
+  if (!omitir.has('SoundCloud-Direct')) {
+    try {
+      const resSc = await resolverSoundCloudDirecto(titBusq, artBusq, durBusq);
+      if (resSc && resSc.url) return resSc;
+    } catch (e2) {
+      console.warn(`[Nivel 2 SoundCloud]: Pasando a Nivel 3 (${e2.message})`);
+    }
   }
 
-  console.error(`[Cascada Oficial]: No se pudo extraer el audio del máster oficial "${artista} - ${titulo}".`);
+  // 3. Audius Discovery API (MP3 completos)
+  if (!omitir.has('Audius-Direct')) {
+    try {
+      const resAud = await resolverAudiusDirecto(titBusq, artBusq, durBusq);
+      if (resAud && resAud.url) return resAud;
+    } catch (e3) {
+      console.warn(`[Nivel 3 Audius]: Pasando a Nivel 4 (${e3.message})`);
+    }
+  }
+
+  // 4. Internet Archive (MP3 de dominio público / archivos abiertos)
+  if (!omitir.has('InternetArchive-Direct')) {
+    try {
+      const resIa = await resolverInternetArchiveDirecto(titBusq, artBusq);
+      if (resIa && resIa.url) return resIa;
+    } catch (e4) {
+      console.warn(`[Nivel 4 IA]: Falló (${e4.message})`);
+    }
+  }
+
+  console.error(`[Cascada Oficial]: No se pudo extraer el audio para "${artBusq} - ${titBusq}".`);
   return null;
 }
 

@@ -90,8 +90,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     server: 'servidor-musica',
-    version: 'v5.2.0',
-    cacheVersion: 'app-musica-v5.2.0',
+    version: 'v5.3.0',
+    cacheVersion: 'app-musica-v5.3.0',
     port: PUERTO,
     mode: 'client-direct-download + direct-link-resolver'
   });
@@ -102,14 +102,20 @@ app.get('/health', (req, res) => {
 // Extrae metadatos (título, artista, carátula, duración) de una playlist pública
 // de Spotify desde https://open.spotify.com/embed/playlist/${playlistId} sin API Keys
 // ---------------------------------------------------------------------------
-function extraerPlaylistIdSpotify(inputUrl = '') {
+function extraerRecursoSpotify(inputUrl = '') {
   const limpio = String(inputUrl || '').trim();
   if (!limpio) return null;
-  const matchUri = limpio.match(/spotify:playlist:([a-zA-Z0-9]{15,35})/i);
-  if (matchUri && matchUri[1]) return matchUri[1];
-  const matchUrl = limpio.match(/playlist\/([a-zA-Z0-9]{15,35})/i);
-  if (matchUrl && matchUrl[1]) return matchUrl[1];
-  if (/^[a-zA-Z0-9]{22}$/.test(limpio)) return limpio;
+  const matchUri = limpio.match(/spotify:(playlist|album|track):([a-zA-Z0-9]{15,35})/i);
+  if (matchUri && matchUri[1] && matchUri[2]) {
+    return { tipo: matchUri[1].toLowerCase(), id: matchUri[2] };
+  }
+  const matchUrl = limpio.match(/(playlist|album|track)\/([a-zA-Z0-9]{15,35})/i);
+  if (matchUrl && matchUrl[1] && matchUrl[2]) {
+    return { tipo: matchUrl[1].toLowerCase(), id: matchUrl[2] };
+  }
+  if (/^[a-zA-Z0-9]{22}$/.test(limpio)) {
+    return { tipo: 'playlist', id: limpio };
+  }
   return null;
 }
 
@@ -120,7 +126,7 @@ function decodificarHtmlEntities(str = '') {
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&#x27;/gi, "'")
+    .replace(/&#x27;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
@@ -132,20 +138,38 @@ app.post('/api/spotify/playlist', async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
 
-  const rawUrl = (req.body && req.body.url) ? String(req.body.url).trim() : '';
-  const playlistId = extraerPlaylistIdSpotify(rawUrl);
+  let rawUrl = (req.body && req.body.url) ? String(req.body.url).trim() : '';
 
-  if (!playlistId) {
+  // Resolver enlaces acortados (spotify.link / spoti.fi)
+  if (/^https?:\/\/(spotify\.link|spoti\.fi)\//i.test(rawUrl)) {
+    try {
+      const redirRes = await axios.get(rawUrl, {
+        maxRedirects: 5,
+        timeout: 8000,
+        headers: { 'User-Agent': UA },
+        validateStatus: () => true
+      });
+      const finalUrl = redirRes?.request?.res?.responseUrl || redirRes?.headers?.location || '';
+      if (finalUrl) rawUrl = finalUrl;
+    } catch (eRedir) {
+      console.warn('[/api/spotify/playlist]: No se pudo resolver enlace corto:', eRedir.message);
+    }
+  }
+
+  const recurso = extraerRecursoSpotify(rawUrl);
+
+  if (!recurso) {
     return res.status(400).json({
       error: true,
-      mensaje: 'Enlace de Spotify inválido. Pega un enlace válido como https://open.spotify.com/playlist/...'
+      mensaje: 'Enlace de Spotify inválido. Pega un enlace de playlist, álbum o canción (open.spotify.com/...).'
     });
   }
 
-  const embedUrl = `https://open.spotify.com/embed/playlist/${playlistId}`;
-  const publicUrl = `https://open.spotify.com/playlist/${playlistId}`;
+  const { tipo, id: playlistId } = recurso;
+  const embedUrl = `https://open.spotify.com/embed/${tipo}/${playlistId}`;
+  const publicUrl = `https://open.spotify.com/${tipo}/${playlistId}`;
 
-  console.log(`\n[/api/spotify/playlist]: Analizando playlist ID: ${playlistId}`);
+  console.log(`\n[/api/spotify/playlist]: Analizando ${tipo} ID: ${playlistId}`);
 
   try {
     let nombrePlaylist = 'Playlist de Spotify';
@@ -242,6 +266,20 @@ app.post('/api/spotify/playlist', async (req, res) => {
                 const tUri = trackObj.uri || trackObj.id || '';
                 agregarCancionUnica(tTitle, tArtist, tThumb, tDur, tUri);
               }
+            }
+
+            // Si es un enlace directo de canción (/track/...), entity es la propia canción
+            if (cancionesExtraidas.length === 0 && (tipo === 'track' || entity.type === 'track')) {
+              const tTitle = entity.title || entity.name || '';
+              const tArtist =
+                entity.subtitle ||
+                (Array.isArray(entity.artists)
+                  ? entity.artists.map((a) => a.name || a.title || '').filter(Boolean).join(', ')
+                  : '') ||
+                '';
+              const tDur = entity.duration || entity.duration_ms || 0;
+              const tUri = entity.uri || entity.id || playlistId;
+              agregarCancionUnica(tTitle, tArtist, caratulaPlaylist, tDur, tUri);
             }
           }
         } catch (errJson) {
@@ -697,16 +735,25 @@ app.get('/api/obtener-enlace', async (req, res) => {
     }
 
     if (!video) {
-      return finalizar(404, { error: true, mensaje: 'Audio oficial de estudio no disponible' });
+      video = {
+        videoId: '',
+        seconds: duracionSugerida,
+        duracionRef: duracionSugerida,
+        title: busqueda,
+        tituloOriginal: busqueda,
+        artistaOriginal: artistaSugerido,
+        author: { name: artistaSugerido },
+        esVerificadoOficial: false
+      };
     }
 
     const trackTitle = video.title || busqueda;
     const trackArtist = (video.author && video.author.name) ? video.author.name : artistaSugerido;
     const trackDuration = video.seconds || duracionSugerida || 0;
 
-    console.log(`[Video Seleccionado]: "${trackTitle}" (${video.seconds}s, ID: ${video.videoId})`);
+    console.log(`[Video Seleccionado]: "${trackTitle}" (${trackDuration}s, ID: ${video.videoId || 'N/A'})`);
 
-    // 2. Resolver enlace con la cascada oficial de estudio (Prohibido covers de relleno)
+    // 2. Resolver enlace con la cascada oficial de estudio (YouTube + SoundCloud + Audius + IA)
     const resultadoAudio = await resolverAudioConCascada(video, busqueda, formatoDeseado, { estricto: modoEstricto });
 
     if (!resultadoAudio || !resultadoAudio.url) {
@@ -722,7 +769,7 @@ app.get('/api/obtener-enlace', async (req, res) => {
       resultadoAudio.esHlsSoundCloud ||
       (resultadoAudio.proveedor === 'ytdl-native-stream' && downloadUrlFinal.includes('googlevideo.com'))
     ) {
-      downloadUrlFinal = `/api/proxy-stream?url=${encodeURIComponent(downloadUrlFinal)}`;
+      downloadUrlFinal = `/api/proxy-stream?url=${encodeURIComponent(downloadUrlFinal)}&q=${encodeURIComponent(busqueda)}&artist=${encodeURIComponent(artistaSugerido)}&seconds=${trackDuration}${modoEstricto ? '&estricto=1' : ''}`;
     }
 
     console.log(`[Éxito Cascada]: Enlace entregado al cliente (${resultadoAudio.calidad} / ${resultadoAudio.proveedor}): ${downloadUrlFinal.substring(0, 80)}...`);
@@ -996,19 +1043,22 @@ app.get('/api/proxy-stream', async (req, res) => {
   });
 
   const headersAxios = {
-    'Referer': 'https://loader.to/',
     'User-Agent': UA,
     'Accept': '*/*'
   };
+  if (audioUrl.includes('googlevideo.com')) {
+    headersAxios['Origin'] = 'https://www.youtube.com';
+    headersAxios['Referer'] = 'https://www.youtube.com/';
+  }
   if (req.headers.range) {
     headersAxios['Range'] = req.headers.range;
   }
 
   // Petición con soporte de reintento automático y timeout mínimo de 60 segundos
-  const intentarProxy = async (esReintento = false) => {
+  const intentarProxy = async (urlObjetivo = audioUrl) => {
     return await axios({
       method: 'get',
-      url: audioUrl,
+      url: urlObjetivo,
       responseType: 'stream',
       timeout: 60000,
       headers: headersAxios,
@@ -1020,11 +1070,41 @@ app.get('/api/proxy-stream', async (req, res) => {
   try {
     let response = null;
     try {
-      response = await intentarProxy(false);
+      response = await intentarProxy(audioUrl);
     } catch (eInicial) {
       console.warn(`[/api/proxy-stream]: Intento 1 falló (${eInicial.message}), aplicando reintento automático...`);
       await new Promise((r) => setTimeout(r, 600));
-      response = await intentarProxy(true);
+      response = await intentarProxy(audioUrl);
+    }
+
+    const esEstrictoProxy = req.query.estricto === '1' || req.query.estricto === 'true' || req.query.origen === 'spotify';
+
+    // Si googlevideo.com u otro origen devolvió 403/401/410 y tenemos q/videoId, conmutar a SoundCloud/Audius/IA (solo si NO es modo estricto)
+    if (!esEstrictoProxy && (!response || (response.status !== 200 && response.status !== 206)) && (busqueda || artistaParam || videoId)) {
+      console.warn(`[/api/proxy-stream]: Origen devolvió HTTP ${response ? response.status : 'error'}. Conmutando a fuentes alternativas...`);
+      try {
+        const resAlt = await resolverAudioConCascada(
+          {
+            videoId: '',
+            title: busqueda,
+            tituloOriginal: busqueda,
+            artistaOriginal: artistaParam,
+            duracionRef: parseInt(req.query.seconds) || 0,
+            author: { name: artistaParam }
+          },
+          busqueda || artistaParam,
+          req.query.formato || 'mp3',
+          { omitirProveedores: ['ytdl-native-stream'] }
+        );
+        if (resAlt && resAlt.url) {
+          audioUrl = resAlt.url.replace(/^http:\/\//i, 'https://');
+          delete headersAxios['Origin'];
+          delete headersAxios['Referer'];
+          response = await intentarProxy(audioUrl);
+        }
+      } catch (eAlt) {
+        console.warn('[/api/proxy-stream Fallback]:', eAlt.message);
+      }
     }
 
     if (!response || (response.status !== 200 && response.status !== 206)) {
@@ -1228,7 +1308,16 @@ app.get('/api/descargar-cancion', async (req, res) => {
     }
 
     if (!video) {
-      return responderError(404, 'Audio oficial de estudio no disponible');
+      video = {
+        videoId: '',
+        seconds: duracionSugerida,
+        duracionRef: duracionSugerida,
+        title: busqueda,
+        tituloOriginal: busqueda,
+        artistaOriginal: artistaSugerido,
+        author: { name: artistaSugerido },
+        esVerificadoOficial: false
+      };
     }
 
     const trackTitle = video.title || busqueda;
@@ -1298,14 +1387,35 @@ app.get('/api/descargar-cancion', async (req, res) => {
       return !ct.includes('text/html') && !ct.includes('application/json') && !ct.includes('mpegurl');
     })();
 
-    // DEGRADACIÓN ELEGANTE (Downgrade Transparente): Si 320k falló o saturó, conmutar a flujo estándar
+    // DEGRADACIÓN ELEGANTE (Downgrade Transparente): Si el proveedor inicial falló, conmutar al siguiente en la cascada
     if (!esValido) {
-      console.warn(`[Downgrade Transparente]: Proveedor inicial (${resultadoAudio.proveedor}) saturado o fallido. Conmutando a flujo estándar (160k/128k)...`);
+      console.warn(`[Downgrade Transparente]: Proveedor inicial (${resultadoAudio.proveedor}) saturado o fallido. Conmutando a siguiente proveedor...`);
       try {
-        const fallbackAudio = await resolverAudioConCascada(video, busqueda, 'mp3', { estricto: modoEstricto });
+        const fallbackAudio = await resolverAudioConCascada(video, busqueda, 'mp3', {
+          estricto: modoEstricto,
+          omitirProveedores: [resultadoAudio.proveedor]
+        });
         if (fallbackAudio && fallbackAudio.url && fallbackAudio.url !== downloadUrl) {
           resultadoAudio = fallbackAudio;
           downloadUrl = fallbackAudio.url.replace(/^http:\/\//i, 'https://');
+          if (
+            fallbackAudio.esHlsSoundCloud ||
+            downloadUrl.includes('playback.media-streaming.soundcloud.cloud') ||
+            downloadUrl.includes('.m3u8')
+          ) {
+            const ensamblado = await ensamblarHlsSoundCloudABuffer(downloadUrl);
+            clearTimeout(timeoutGuard);
+            respondido = true;
+            const safeTitle = trackTitle.replace(/[/\\?%*:|"<>]/g, '_');
+            res.setHeader('Content-Type', ensamblado.mime);
+            res.setHeader('Content-Length', ensamblado.buffer.length);
+            res.setHeader('Accept-Ranges', 'bytes');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('X-Titulo-Audio', encodeURIComponent(trackTitle));
+            res.setHeader('X-Calidad-Audio', fallbackAudio.calidad);
+            res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.mp3"`);
+            return res.status(200).send(ensamblado.buffer);
+          }
           response = await intentarConectarStream(downloadUrl);
         }
       } catch (errFallback) {
@@ -1449,7 +1559,7 @@ app.use((req, res, next) => {
 app.get('/api/ota/version.json', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.status(200).json({
-    version: (process.env.OTA_BUNDLE_VERSION || '5.2.0').trim(),
+    version: (process.env.OTA_BUNDLE_VERSION || '5.3.0').trim(),
     bundleUrl: (process.env.OTA_BUNDLE_URL || '').trim(),
     notes: (process.env.OTA_NOTES || '').trim(),
     updatedAt: new Date().toISOString()
